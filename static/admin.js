@@ -330,6 +330,146 @@ async function deleteMapping(name) {
   }
 }
 
+// ─── Config Import/Export ──────────────────────────────
+async function exportConfig() {
+  try {
+    const data = await api('/api/admin/config/export');
+    const json = JSON.stringify(data, null, 2);
+    const ta = document.getElementById('configJson');
+    if (ta) ta.value = json;
+
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = `api2cursor-config-${ts}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('已导出配置');
+  } catch (e) {
+    toast('导出失败: ' + e.message, false);
+  }
+}
+
+function pickImportFile() {
+  const input = document.getElementById('importFile');
+  if (!input) return;
+  input.value = '';
+  input.click();
+}
+
+async function importConfigObject(obj) {
+  await api('/api/admin/config/import', {
+    method: 'POST',
+    body: JSON.stringify(obj),
+  });
+}
+
+async function importConfigFromTextarea() {
+  const ta = document.getElementById('configJson');
+  if (!ta) { toast('找不到输入框', false); return; }
+  const text = (ta.value || '').trim();
+  if (!text) { toast('请粘贴 JSON', false); return; }
+  if (!confirm('确定要导入并覆盖当前配置吗？')) return;
+  try {
+    const obj = JSON.parse(text);
+    await importConfigObject(obj);
+    toast('配置已导入');
+    await loadDashboard();
+  } catch (e) {
+    toast('导入失败: ' + (e.message || e), false);
+  }
+}
+
+const importFileEl = document.getElementById('importFile');
+if (importFileEl) {
+  importFileEl.addEventListener('change', async function() {
+    const f = this.files && this.files[0];
+    if (!f) return;
+    if (!confirm('确定要导入并覆盖当前配置吗？')) return;
+    try {
+      const text = await f.text();
+      const obj = JSON.parse(text);
+      await importConfigObject(obj);
+      toast('配置已导入');
+      await loadDashboard();
+    } catch (e) {
+      toast('导入失败: ' + (e.message || e), false);
+    }
+  });
+}
+
+// ─── Logs ZIP export ───────────────────────────────────
+function localDatetimeToIso(id) {
+  const el = document.getElementById(id);
+  if (!el || !el.value) return '';
+  const d = new Date(el.value);
+  if (isNaN(d.getTime())) return '';
+  return d.toISOString();
+}
+
+async function downloadLogsZip(payload) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (authKey) headers['Authorization'] = 'Bearer ' + authKey;
+  const res = await fetch(API + '/api/admin/logs/export', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      const j = await res.json();
+      const e = j.error;
+      const msg = (typeof e === 'object' && e !== null) ? (e.message || JSON.stringify(e)) : (e || 'HTTP ' + res.status);
+      throw new Error(msg);
+    }
+    const text = await res.text();
+    throw new Error('HTTP ' + res.status + ': ' + text.substring(0, 200));
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get('content-disposition') || '';
+  let name = 'api2cursor-logs.zip';
+  const m = /filename\*?=(?:UTF-8'')?["']?([^";\n]+)/i.exec(cd);
+  if (m && m[1]) name = decodeURIComponent(m[1].replace(/"/g, ''));
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast('已下载 ZIP');
+}
+
+async function exportLogsZipAll() {
+  if (!confirm('将导出全部会话日志（可能较大），是否继续？')) return;
+  try {
+    await downloadLogsZip({ all: true });
+  } catch (e) {
+    toast('导出失败: ' + e.message, false);
+  }
+}
+
+async function exportLogsZipRange() {
+  const start = localDatetimeToIso('logExportStart');
+  const end = localDatetimeToIso('logExportEnd');
+  if (!start || !end) {
+    toast('请填写开始与结束时间（精确到秒）', false);
+    return;
+  }
+  if (!confirm('将按时间范围导出会话日志，是否继续？')) return;
+  try {
+    await downloadLogsZip({ all: false, start, end });
+  } catch (e) {
+    toast('导出失败: ' + e.message, false);
+  }
+}
+
 // ─── Live Logs ─────────────────────────────────────────
 function clearLiveLogs() {
   const el = document.getElementById('liveLogs');

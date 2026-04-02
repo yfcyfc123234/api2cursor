@@ -7,14 +7,17 @@
 """
 
 import os
+import io
 import logging
 import json
 import glob
 import queue
 import threading
+import zipfile
+from datetime import datetime, timezone
 from typing import Any
 
-from flask import Blueprint, request, jsonify, send_from_directory
+from flask import Blueprint, request, jsonify, send_from_directory, send_file
 
 import settings
 from config import Config
@@ -218,6 +221,61 @@ def get_stats():
     return jsonify(usage_tracker.get_stats())
 
 
+# ─── 配置导入 / 导出 ──────────────────────────────────
+
+
+@bp.route('/api/admin/config/export', methods=['GET'])
+def export_config():
+    """导出当前可配置项（settings.json 的全部内容）。"""
+    err = _check_auth()
+    if err:
+        return err
+    s = settings.get()
+    return jsonify({
+        'type': 'api2cursor_config',
+        'version': 1,
+        'exported_at': s.get('updated_at', ''),
+        'settings': s,
+    })
+
+
+@bp.route('/api/admin/config/import', methods=['POST'])
+def import_config():
+    """导入配置（覆盖写入 settings.json）。"""
+    err = _check_auth()
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    payload = data.get('settings') if isinstance(data, dict) and 'settings' in data else data
+    if not isinstance(payload, dict):
+        return jsonify({'error': {'message': '配置必须为 JSON 对象', 'type': 'bad_request'}}), 400
+
+    allowed_top = {
+        'proxy_target_url',
+        'proxy_api_key',
+        'debug_mode',
+        'model_mappings',
+    }
+    cleaned: dict[str, Any] = {}
+    for k in allowed_top:
+        if k in payload:
+            cleaned[k] = payload[k]
+
+    # model_mappings 基础校验
+    mappings = cleaned.get('model_mappings', {})
+    if mappings is not None and not isinstance(mappings, dict):
+        return jsonify({'error': {'message': 'model_mappings 必须是对象', 'type': 'bad_request'}}), 400
+
+    try:
+        settings.save(cleaned)
+    except OSError as e:
+        logger.error(f'导入配置保存失败: {e}')
+        return jsonify({'error': {'message': f'保存失败: {e}', 'type': 'save_error'}}), 500
+
+    logger.info('配置已通过导入覆盖更新')
+    return jsonify({'ok': True})
+
+
 # ─── 内部辅助 ─────────────────────────────────────
 
 
@@ -308,6 +366,148 @@ def _list_conversation_files() -> list[str]:
     files = glob.glob(pattern)
     files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
     return files
+
+
+def _parse_iso_dt(s: str) -> datetime | None:
+    """解析 ISO8601 时间（支持 Z 结尾）；无时区则按 UTC。"""
+    if not s or not str(s).strip():
+        return None
+    text = str(s).strip()
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _dt_in_range(t: datetime, start: datetime | None, end: datetime | None) -> bool:
+    if start is not None and t < start:
+        return False
+    if end is not None and t > end:
+        return False
+    return True
+
+
+def _conversation_doc_in_time_range(doc: dict[str, Any], start: datetime | None, end: datetime | None) -> bool:
+    """判断会话文档是否与 [start, end]（含端点）有交集。"""
+    times: list[datetime] = []
+    for k in ('created_at', 'updated_at'):
+        t = _parse_iso_dt(str(doc.get(k) or ''))
+        if t:
+            times.append(t)
+    for turn in doc.get('turns') or []:
+        if not isinstance(turn, dict):
+            continue
+        for k in ('started_at', 'updated_at'):
+            t = _parse_iso_dt(str(turn.get(k) or ''))
+            if t:
+                times.append(t)
+    if not times:
+        return False
+    return any(_dt_in_range(t, start, end) for t in times)
+
+
+def _logs_export_readme() -> str:
+    return (
+        'api2cursor 日志导出包说明\n'
+        '========================\n\n'
+        '01_cursor_proxy_sessions/\n'
+        '  按日期分目录的会话 JSON（与服务器 data/conversations 下内容一致，二进制原样打包）。\n'
+        '  每条 turn 含 client_request / upstream_request / upstream_response / client_response / stream_trace 等，\n'
+        '  用于分析 Cursor → 本代理 → 上游 LLM 的交互流程。\n\n'
+        '02_application_meta/\n'
+        '  settings_snapshot.json — 当前持久化配置快照（data/settings.json 等价）。\n'
+        '  log_notes.json — 管理面板为会话添加的备注。\n\n'
+        'manifest.json — 导出元数据（时间、筛选条件、文件数量等）。\n\n'
+        '关于「流式是否截断」：若环境变量 VERBOSE_FULL_STREAM=1，则 verbose 模式下写入磁盘的\n'
+        'stream_trace 事件为完整列表；否则可能仅保留头尾若干条（中间折叠计数），详见 request_logger。\n'
+    )
+
+
+@bp.route('/api/admin/logs/export', methods=['POST'])
+def logs_export_zip():
+    """导出会话日志等为 ZIP（默认全部，或按时间范围）。"""
+    err = _check_auth()
+    if err:
+        return err
+
+    data = request.get_json(force=True, silent=True) or {}
+    export_all = bool(data.get('all', False))
+    start_s = (data.get('start') or '').strip()
+    end_s = (data.get('end') or '').strip()
+
+    start_dt = _parse_iso_dt(start_s) if start_s else None
+    end_dt = _parse_iso_dt(end_s) if end_s else None
+
+    if not export_all:
+        if start_dt is None or end_dt is None:
+            return jsonify({'error': {'message': '请设置 all=true，或同时提供 start 与 end（ISO8601）', 'type': 'bad_request'}}), 400
+        if start_dt > end_dt:
+            return jsonify({'error': {'message': 'start 不能晚于 end', 'type': 'bad_request'}}), 400
+
+    files = _list_conversation_files()
+    included: list[str] = []
+    for fp in files:
+        if export_all:
+            included.append(fp)
+            continue
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                doc = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(doc, dict) and _conversation_doc_in_time_range(doc, start_dt, end_dt):
+            included.append(fp)
+
+    buf = io.BytesIO()
+    exported_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        manifest: dict[str, Any] = {
+            'type': 'api2cursor_logs_export',
+            'version': 1,
+            'exported_at': exported_at,
+            'export_all': export_all,
+            'time_range': None if export_all else {'start': start_s, 'end': end_s},
+            'session_file_count': len(included),
+            'verbose_full_stream_env': os.getenv('VERBOSE_FULL_STREAM', ''),
+        }
+        zf.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
+        zf.writestr('02_application_meta/README.txt', _logs_export_readme())
+
+        try:
+            snap = settings.get()
+            zf.writestr(
+                '02_application_meta/settings_snapshot.json',
+                json.dumps(snap, ensure_ascii=False, indent=2, default=str),
+            )
+        except Exception as e:
+            zf.writestr('02_application_meta/settings_snapshot.error.txt', str(e))
+
+        notes = _load_log_notes()
+        zf.writestr(
+            '02_application_meta/log_notes.json',
+            json.dumps(notes, ensure_ascii=False, indent=2, default=str),
+        )
+
+        for fp in included:
+            rel = os.path.relpath(fp, _LOG_DIR).replace('\\', '/')
+            arcname = f'01_cursor_proxy_sessions/{rel}'
+            with open(fp, 'rb') as f:
+                zf.writestr(arcname, f.read())
+
+    buf.seek(0)
+    fname = f'api2cursor-logs-{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}.zip'
+    return send_file(
+        buf,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=fname,
+        max_age=0,
+    )
 
 
 @bp.route('/api/admin/logs/live', methods=['GET'])

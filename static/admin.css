@@ -85,7 +85,7 @@ main{padding:28px 0 60px}
 @keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:none;opacity:1}}
 
 /* ─── Logs Panel ─────────────────────────────────── */
-.log-actions{display:flex;gap:10px;align-items:center;margin-top:-8px;margin-bottom:12px}
+.log-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;margin-bottom:12px}
 .log-pane{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;max-height:360px;overflow:auto}
 
 .log-line{border:1px solid rgba(42,58,80,.6);background:rgba(21,29,46,.35);border-radius:8px;padding:10px;margin-bottom:10px}

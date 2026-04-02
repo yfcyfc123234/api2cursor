@@ -30,6 +30,10 @@ _LOCKS_GUARD = threading.Lock()
 _STREAM_KEEP_HEAD = 12
 _STREAM_KEEP_TAIL = 12
 
+# 设为 1/true 时，verbose 模式下写入磁盘的流式事件不再做头尾折叠（完整保留，文件可能非常大）。
+# 用于离线分析 Cursor ↔ 上游 LLM 的完整交互；实时 SSE 预览仍可能截断字符串长度。
+_FULL_STREAM_DISK = os.getenv('VERBOSE_FULL_STREAM', '').lower() in ('1', 'true', 'yes', 'on')
+
 # ─── 实时日志（verbose 模式） ─────────────────────────
 #
 # 实时日志用于管理面板在“正在生成”时可见 request/response 的过程。
@@ -378,6 +382,10 @@ def _append_stream_event(stream_trace: dict[str, Any], kind: str, event: Any) ->
 
     events = stream_trace.setdefault(events_key, [])
     stream_trace[total_key] = stream_trace.get(total_key, 0) + 1
+
+    if _FULL_STREAM_DISK:
+        events.append(event)
+        return
 
     # 前 KEEP_HEAD 条完整保留；之后只保留最后 KEEP_TAIL 条，
     # 中间部分通过 dropped 计数折叠，避免文件膨胀。

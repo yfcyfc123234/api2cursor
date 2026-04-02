@@ -92,6 +92,32 @@
       <div id="statsContent"><div class="empty">加载中…</div></div>
     </div>
 
+    <!-- 配置导入 / 导出 -->
+    <div class="card">
+      <div class="card-header">
+        <h2>导入 / 导出配置</h2>
+        <span class="badge">一键迁移</span>
+      </div>
+      <div class="hint">
+        这里会导入/导出所有可通过管理面板配置的选项（全局设置 + 模型映射等）。<br>
+        注意：导入会覆盖服务器当前配置（等价于重写 <code>data/settings.json</code>）。
+      </div>
+
+      <div class="log-toolbar" style="margin-top:12px">
+        <button class="btn btn-ghost btn-sm" onclick="exportConfig()">导出 JSON</button>
+        <button class="btn btn-ghost btn-sm" onclick="pickImportFile()">导入 JSON 文件</button>
+        <input type="file" id="importFile" accept="application/json" style="display:none" />
+      </div>
+
+      <div class="field" style="margin-top:12px">
+        <label>粘贴配置 JSON（可选）</label>
+        <div class="input-wrap">
+          <textarea id="configJson" rows="6" placeholder='粘贴 export 的 JSON，或仅粘贴 settings 对象也可以' style="resize:vertical;min-height:120px;font-family:Consolas,Monaco,monospace;font-size:13px"></textarea>
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="importConfigFromTextarea()">一键应用</button>
+    </div>
+
   </main>
 </div>
 

@@ -38,6 +38,30 @@
   </header>
 
   <main class="container">
+    <!-- 导出日志 ZIP -->
+    <div class="card">
+      <div class="card-header">
+        <h2>导出日志（ZIP）</h2>
+        <span class="badge">分析用</span>
+      </div>
+      <div class="hint">
+        打包内容按目录区分：<code>01_cursor_proxy_sessions/</code> 为 Cursor→代理→上游 的会话级原始 JSON（与服务器 <code>data/conversations</code> 一致）；<code>02_application_meta/</code> 为应用侧配置快照与备注。<br>
+        若需<strong>流式交互在磁盘上完全不截断</strong>，请在服务端环境变量设置 <code>VERBOSE_FULL_STREAM=1</code> 并重启后重新采集；否则历史文件里的 <code>stream_trace</code> 可能仍是头尾采样。
+      </div>
+      <div class="log-toolbar" style="margin-top:12px">
+        <button class="btn btn-primary btn-sm" onclick="exportLogsZipAll()">导出全部 ZIP</button>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label>开始时间（本地，精确到秒）</label>
+        <div class="input-wrap"><input type="datetime-local" id="logExportStart" step="1" /></div>
+      </div>
+      <div class="field">
+        <label>结束时间（本地，精确到秒）</label>
+        <div class="input-wrap"><input type="datetime-local" id="logExportEnd" step="1" /></div>
+      </div>
+      <button class="btn btn-ghost" onclick="exportLogsZipRange()">按时间范围导出 ZIP</button>
+    </div>
+
     <!-- 实时日志 -->
     <div class="card">
       <div class="card-header">
