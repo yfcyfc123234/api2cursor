@@ -90,6 +90,8 @@ git fetch --all --prune
 git checkout main 2>/dev/null || git checkout master
 git pull --rebase
 
+// git fetch origin --prune && (git checkout main 2>/dev/null || git checkout master) && git pull --rebase
+
 docker compose up -d --build --remove-orphans
 # 或旧版：docker-compose up -d --build --remove-orphans
 ```
