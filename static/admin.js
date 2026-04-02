@@ -1,6 +1,10 @@
 const API = '';
 let authKey = '';
 let editingName = null;
+let liveEs = null;
+let livePaused = false;
+let liveItems = 0;
+let currentLogId = null;
 
 function togglePwd(id) {
   const el = document.getElementById(id);
@@ -56,6 +60,10 @@ async function doLogin() {
 function doLogout() {
   authKey = '';
   sessionStorage.removeItem('_ak');
+  if (liveEs) {
+    try { liveEs.close(); } catch { }
+    liveEs = null;
+  }
   document.getElementById('dashboard').style.display = 'none';
   document.getElementById('login').style.display = 'flex';
 }
@@ -64,14 +72,31 @@ function doLogout() {
 async function loadDashboard() {
   try {
     const s = await api('/api/admin/settings');
-    document.getElementById('targetUrl').value = s.proxy_target_url || '';
-    document.getElementById('proxyKey').value = s.proxy_api_key || '';
-    document.getElementById('debugMode').value = s.debug_mode || 'off';
-    document.getElementById('envUrl').textContent = s.env_target_url ? '环境变量: ' + s.env_target_url : '';
-    document.getElementById('envKey').textContent = s.env_api_key ? '环境变量: (已配置)' : '环境变量: (未设置)';
-    await loadMappings();
-    checkHealth();
-    loadStats();
+    const targetUrlEl = document.getElementById('targetUrl');
+    if (targetUrlEl) targetUrlEl.value = s.proxy_target_url || '';
+    const proxyKeyEl = document.getElementById('proxyKey');
+    if (proxyKeyEl) proxyKeyEl.value = s.proxy_api_key || '';
+    const debugModeEl = document.getElementById('debugMode');
+    if (debugModeEl) debugModeEl.value = s.debug_mode || 'off';
+    const envUrlEl = document.getElementById('envUrl');
+    if (envUrlEl) envUrlEl.textContent = s.env_target_url ? '环境变量: ' + s.env_target_url : '';
+    const envKeyEl = document.getElementById('envKey');
+    if (envKeyEl) envKeyEl.textContent = s.env_api_key ? '环境变量: (已配置)' : '环境变量: (未设置)';
+
+    const mappingListEl = document.getElementById('mappingList');
+    if (mappingListEl) await loadMappings();
+
+    const statusBadgeEl = document.getElementById('statusBadge');
+    if (statusBadgeEl) checkHealth();
+
+    const statsContentEl = document.getElementById('statsContent');
+    if (statsContentEl) loadStats();
+
+    const liveLogsEl = document.getElementById('liveLogs');
+    if (liveLogsEl) connectLiveLogs();
+
+    const logsListEl = document.getElementById('logsList');
+    if (logsListEl) loadLogs();
   } catch (e) {
     toast('加载设置失败: ' + e.message, false);
   }
@@ -79,6 +104,7 @@ async function loadDashboard() {
 
 async function loadStats() {
   const el = document.getElementById('statsContent');
+  if (!el) return;
   try {
     const data = await api('/api/admin/stats');
     const models = data.models || {};
@@ -109,6 +135,7 @@ async function checkHealth() {
     const r = await fetch(API + '/health');
     const d = await r.json();
     const b = document.getElementById('statusBadge');
+    if (!b) return;
     if (d.status === 'ok') {
       b.textContent = '已连接';
       b.style.background = 'rgba(34,197,94,.15)';
@@ -144,6 +171,7 @@ async function saveSettings() {
 async function loadMappings() {
   const mappings = await api('/api/admin/mappings');
   const el = document.getElementById('mappingList');
+  if (!el) return;
   const keys = Object.keys(mappings);
 
   if (!keys.length) {
@@ -302,6 +330,282 @@ async function deleteMapping(name) {
   }
 }
 
+// ─── Live Logs ─────────────────────────────────────────
+function clearLiveLogs() {
+  const el = document.getElementById('liveLogs');
+  if (!el) return;
+  el.innerHTML = '<div class="empty">已清空</div>';
+  liveItems = 0;
+}
+
+function toggleLivePause() {
+  livePaused = !livePaused;
+  const btn = document.getElementById('livePauseBtn');
+  if (btn) btn.textContent = livePaused ? '继续' : '暂停';
+  toast(livePaused ? '已暂停实时日志' : '已继续实时日志');
+}
+
+function liveKindClass(kind) {
+  const k = String(kind || '').toLowerCase();
+  if (k === 'error') return 'log-kind log-kind-error';
+  if (k.includes('client')) return 'log-kind log-kind-client';
+  if (k.includes('upstream')) return 'log-kind log-kind-upstream';
+  if (k.includes('summary') || k.includes('done') || k.includes('turn_done')) return 'log-kind log-kind-summary';
+  return 'log-kind';
+}
+
+function appendLiveLog(evt) {
+  if (livePaused) return;
+  const container = document.getElementById('liveLogs');
+  if (!container) return;
+  if (liveItems === 0) container.innerHTML = '';
+  if (container.firstChild && liveItems > 180) container.removeChild(container.firstChild);
+
+  const line = document.createElement('div');
+  line.className = 'log-line';
+
+  const meta = document.createElement('div');
+  meta.className = 'log-meta';
+
+  const kind = document.createElement('span');
+  kind.className = liveKindClass(evt.kind);
+  kind.textContent = evt.kind || '';
+
+  const ts = document.createElement('span');
+  ts.textContent = evt.ts ? String(evt.ts).replace('T', ' ').replace('Z', '') : '';
+
+  const route = document.createElement('span');
+  route.textContent = evt.route ? ('[' + evt.route + ']') : '';
+
+  const model = document.createElement('span');
+  model.textContent = evt.client_model ? ('model=' + evt.client_model) : '';
+
+  meta.appendChild(kind);
+  meta.appendChild(ts);
+  meta.appendChild(route);
+  meta.appendChild(model);
+
+  const pre = document.createElement('pre');
+  pre.className = 'log-payload';
+  pre.textContent = evt.payload || '';
+
+  line.appendChild(meta);
+  line.appendChild(pre);
+  container.appendChild(line);
+
+  liveItems += 1;
+}
+
+function connectLiveLogs() {
+  const container = document.getElementById('liveLogs');
+  if (!container) return;
+
+  if (liveEs) {
+    try { liveEs.close(); } catch { }
+    liveEs = null;
+  }
+
+  livePaused = false;
+  liveItems = 0;
+  if (document.getElementById('livePauseBtn')) document.getElementById('livePauseBtn').textContent = '暂停';
+  container.innerHTML = '<div class="empty">连接中…</div>';
+
+  const key = authKey ? encodeURIComponent(authKey) : '';
+  const url = API + '/api/admin/logs/live?key=' + key;
+
+  try {
+    liveEs = new EventSource(url);
+  } catch (e) {
+    container.innerHTML = '<div class="empty">无法建立 SSE 连接</div>';
+    return;
+  }
+
+  liveEs.onmessage = (e) => {
+    let msg = null;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    if (!msg) return;
+    if (msg.type === 'ping') return;
+    if (msg.type === 'hello') {
+      container.innerHTML = '<div class="empty">已连接</div>';
+      return;
+    }
+    appendLiveLog(msg);
+  };
+
+  liveEs.onerror = () => {
+    // EventSource 会自动重连；这里保持 UI 友好
+    if (container.innerText.indexOf('离线') !== -1) return;
+    container.innerHTML = '<div class="empty">离线（可手动刷新或等待重连）</div>';
+  };
+}
+
+// ─── History Logs (CRUD) ───────────────────────────────
+async function loadLogs() {
+  const list = document.getElementById('logsList');
+  const detail = document.getElementById('logsDetail');
+  if (!list || !detail) return;
+
+  list.innerHTML = '<div class="empty">加载中…</div>';
+  detail.innerHTML = '<div class="empty">请选择一条日志</div>';
+
+  const q = document.getElementById('logsSearch') ? document.getElementById('logsSearch').value.trim() : '';
+  const qs = ['limit=40'];
+  if (q) qs.push('q=' + encodeURIComponent(q));
+
+  try {
+    const data = await api('/api/admin/logs?' + qs.join('&'));
+    const items = data.items || [];
+    if (!items.length) {
+      list.innerHTML = '<div class="empty">暂无数据</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.className = 'logs-row';
+      row.onclick = () => viewLogDetail(it.conversation_id);
+
+      const top = document.createElement('div');
+      top.className = 'row-top';
+
+      const id = document.createElement('div');
+      id.className = 'row-id';
+      id.textContent = it.conversation_id;
+
+      const pill = document.createElement('span');
+      pill.className = 'log-kind';
+      pill.textContent = it.route || 'unknown';
+
+      top.appendChild(id);
+      top.appendChild(pill);
+
+      const meta = document.createElement('div');
+      meta.className = 'row-meta';
+      meta.textContent = `updated: ${it.updated_at || ''} | model: ${it.last_client_model || ''} | turns: ${it.turn_count || 0}`;
+
+      row.appendChild(top);
+      row.appendChild(meta);
+      list.appendChild(row);
+    }
+  } catch (e) {
+    list.innerHTML = '<div class="empty">加载失败</div>';
+    toast('加载日志失败: ' + e.message, false);
+  }
+}
+
+async function viewLogDetail(conversationId) {
+  if (!conversationId) return;
+  currentLogId = conversationId;
+  const detail = document.getElementById('logsDetail');
+  if (!detail) return;
+
+  detail.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const data = await api('/api/admin/logs/' + encodeURIComponent(conversationId));
+    const conv = data.conversation || {};
+    const note = data.note || '';
+
+    detail.innerHTML = '';
+
+    const actions = document.createElement('div');
+    actions.className = 'log-detail-actions';
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn btn-red btn-sm';
+    delBtn.textContent = '删除日志';
+    delBtn.onclick = () => deleteLog(conversationId);
+
+    const refreshNoteBtn = document.createElement('button');
+    refreshNoteBtn.className = 'btn btn-ghost btn-sm';
+    refreshNoteBtn.textContent = '保存备注';
+    refreshNoteBtn.onclick = () => saveLogNote();
+
+    actions.appendChild(delBtn);
+    actions.appendChild(refreshNoteBtn);
+    detail.appendChild(actions);
+
+    const meta = document.createElement('div');
+    meta.className = 'hint';
+    meta.textContent = `conversation=${conversationId} | route=${conv.route || ''} | turns=${conv.turn_count || 0} | updated=${conv.updated_at || ''}`;
+    detail.appendChild(meta);
+
+    const noteField = document.createElement('div');
+    noteField.className = 'field';
+    noteField.style.marginTop = '12px';
+
+    const label = document.createElement('label');
+    label.textContent = '备注（可选，用于标记调试重点）';
+
+    const input = document.createElement('textarea');
+    input.id = 'logNoteInput';
+    input.value = note;
+    input.rows = 3;
+    input.style.resize = 'vertical';
+    input.className = 'input';
+
+    noteField.appendChild(label);
+    noteField.appendChild(document.createElement('div'));
+    noteField.lastChild.className = 'input-wrap';
+    noteField.lastChild.appendChild(input);
+    detail.appendChild(noteField);
+
+    const pre = document.createElement('pre');
+    pre.className = 'log-json';
+    let s = '';
+    try { s = JSON.stringify(conv, null, 2); } catch { s = String(conv); }
+    if (s.length > 60000) s = s.slice(0, 60000) + '\n...[truncated]...';
+    pre.textContent = s;
+    detail.appendChild(pre);
+  } catch (e) {
+    detail.innerHTML = '<div class="empty">加载失败</div>';
+    toast('查看日志失败: ' + e.message, false);
+  }
+}
+
+async function deleteLog(conversationId) {
+  if (!confirm('确定要删除该会话日志吗？')) return;
+  try {
+    await api('/api/admin/logs/' + encodeURIComponent(conversationId), { method: 'DELETE' });
+    toast('日志已删除');
+    currentLogId = null;
+    await loadLogs();
+  } catch (e) {
+    toast('删除失败: ' + e.message, false);
+  }
+}
+
+async function saveLogNote() {
+  if (!currentLogId) return;
+  const ta = document.getElementById('logNoteInput');
+  const note = ta ? ta.value : '';
+  try {
+    await api('/api/admin/logs/' + encodeURIComponent(currentLogId) + '/note', {
+      method: 'PUT',
+      body: JSON.stringify({ note }),
+    });
+    toast('备注已保存');
+    await loadLogs();
+  } catch (e) {
+    toast('保存备注失败: ' + e.message, false);
+  }
+}
+
+async function clearLogs() {
+  if (!confirm('确定要清空历史日志吗？这会删除服务器上的 conversations json 文件。')) return;
+  try {
+    await api('/api/admin/logs/clear', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
+    });
+    toast('历史日志已清空');
+    currentLogId = null;
+    await loadLogs();
+  } catch (e) {
+    toast('清空失败: ' + e.message, false);
+  }
+}
+
 // ─── 初始化 ─────────────────────────────────────────
 (function init() {
   const saved = sessionStorage.getItem('_ak');
@@ -313,9 +617,12 @@ async function deleteMapping(name) {
   }
 })();
 
-document.getElementById('modal').addEventListener('click', function(e) {
-  if (e.target === this) closeModal();
-});
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') closeModal();
-});
+const modalEl = document.getElementById('modal');
+if (modalEl) {
+  modalEl.addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+  });
+}

@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import threading
 from datetime import datetime
 from typing import Any
@@ -28,6 +29,79 @@ _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 _STREAM_KEEP_HEAD = 12
 _STREAM_KEEP_TAIL = 12
+
+# ─── 实时日志（verbose 模式） ─────────────────────────
+#
+# 实时日志用于管理面板在“正在生成”时可见 request/response 的过程。
+# 由于仅在 verbose 模式才会产生日志，因此这里做了尽量轻量的事件预览：
+# - streaming 事件按序号采样（可通过 LIVE_LOG_STREAM_EVENT_SAMPLE_N 调整）
+# - payload 统一截断为字符串预览，避免过大导致队列膨胀/前端卡顿
+
+_LIVE_SUBSCRIBERS_LOCK = threading.Lock()
+_LIVE_SUBSCRIBERS: set[queue.Queue] = set()
+
+_LIVE_SUB_QUEUE_MAXSIZE = int(os.getenv('LIVE_LOG_SUB_QUEUE_MAXSIZE', '500'))
+_LIVE_STREAM_EVENT_SAMPLE_N = int(os.getenv('LIVE_LOG_STREAM_EVENT_SAMPLE_N', '1'))
+_LIVE_PAYLOAD_MAX_CHARS = int(os.getenv('LIVE_LOG_PAYLOAD_MAX_CHARS', '3000'))
+
+
+def register_live_subscriber() -> queue.Queue:
+    """注册一个实时日志订阅者（每个 SSE 连接一个队列）。"""
+    q: queue.Queue = queue.Queue(maxsize=_LIVE_SUB_QUEUE_MAXSIZE)
+    with _LIVE_SUBSCRIBERS_LOCK:
+        _LIVE_SUBSCRIBERS.add(q)
+    return q
+
+
+def unregister_live_subscriber(q: queue.Queue) -> None:
+    """移除实时日志订阅者。"""
+    with _LIVE_SUBSCRIBERS_LOCK:
+        _LIVE_SUBSCRIBERS.discard(q)
+
+
+def _truncate_preview(value: Any, *, max_chars: int = _LIVE_PAYLOAD_MAX_CHARS) -> str:
+    """把任意对象转换为截断后的字符串预览。"""
+    try:
+        if isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+
+    if len(text) > max_chars:
+        return text[:max_chars] + '...[truncated]'
+    return text
+
+
+def _emit_live_event(*, kind: str, turn: dict[str, Any], payload: Any) -> None:
+    """向所有订阅者广播一条实时日志事件。"""
+    if settings.get_debug_mode() != 'verbose':
+        return
+
+    event = {
+        'type': 'log_event',
+        'ts': datetime.utcnow().isoformat() + 'Z',
+        'kind': kind,
+        'conversation_id': turn.get('conversation_id', ''),
+        'turn_id': turn.get('turn_id', ''),
+        'route': turn.get('route', ''),
+        'client_model': turn.get('client_model', ''),
+        'backend': turn.get('backend', ''),
+        'stream': bool(turn.get('stream', False)),
+        'payload': _truncate_preview(payload),
+    }
+
+    with _LIVE_SUBSCRIBERS_LOCK:
+        # 注意：不做深拷贝，payload 已经截断为字符串预览
+        subscribers = list(_LIVE_SUBSCRIBERS)
+
+    for q in subscribers:
+        try:
+            q.put_nowait(event)
+        except queue.Full:
+            # 队列满则丢弃旧事件（不阻塞主线程）
+            pass
 
 
 def start_turn(
@@ -49,7 +123,7 @@ def start_turn(
     now = datetime.utcnow().isoformat() + 'Z'
     conversation_id = get_conversation_id(route=route, payload=client_request)
     turn_id = gen_id('turn_')
-    return {
+    turn = {
         'conversation_id': conversation_id,
         'turn_id': turn_id,
         'route': route,
@@ -77,6 +151,22 @@ def start_turn(
         },
         'error': None,
     }
+    _emit_turn_started_if_needed(turn)
+    return turn
+
+
+def _emit_turn_started_if_needed(turn: dict[str, Any]) -> None:
+    """在开始 turn 时推送一条轻量事件。"""
+    # 为减少开销，不直接推整段 client_request
+    try:
+        payload = {
+            'client_request_keys': list((turn.get('client_request') or {}).keys()),
+            'metadata': turn.get('metadata', {}),
+        }
+        _emit_live_event(kind='turn_started', turn=turn, payload=payload)
+    except Exception:
+        # 实时日志不应影响主链路
+        pass
 
 
 def get_conversation_id(*, route: str, payload: dict[str, Any]) -> str:
@@ -99,6 +189,7 @@ def attach_upstream_request(turn: dict[str, Any] | None, payload: dict[str, Any]
         'body': deep_copy_jsonable(payload),
     }
     _touch(turn)
+    _emit_live_event(kind='upstream_request', turn=turn, payload=turn['upstream_request'])
 
 
 def attach_upstream_response(turn: dict[str, Any] | None, response_data: Any) -> None:
@@ -107,6 +198,7 @@ def attach_upstream_response(turn: dict[str, Any] | None, response_data: Any) ->
         return
     turn['upstream_response'] = deep_copy_jsonable(response_data)
     _touch(turn)
+    _emit_live_event(kind='upstream_response', turn=turn, payload=turn['upstream_response'])
 
 
 def attach_client_response(turn: dict[str, Any] | None, response_data: Any) -> None:
@@ -115,6 +207,7 @@ def attach_client_response(turn: dict[str, Any] | None, response_data: Any) -> N
         return
     turn['client_response'] = deep_copy_jsonable(response_data)
     _touch(turn)
+    _emit_live_event(kind='client_response', turn=turn, payload=turn['client_response'])
 
 
 def append_upstream_event(turn: dict[str, Any] | None, event: Any) -> None:
@@ -123,6 +216,13 @@ def append_upstream_event(turn: dict[str, Any] | None, event: Any) -> None:
         return
     _append_stream_event(turn['stream_trace'], 'upstream', deep_copy_jsonable(event))
     _touch(turn)
+    # streaming 事件可能频繁：按序号采样减少开销
+    try:
+        seq = int(turn['stream_trace'].get('upstream_total', 0))
+        if seq == 1 or _LIVE_STREAM_EVENT_SAMPLE_N <= 1 or seq % _LIVE_STREAM_EVENT_SAMPLE_N == 0:
+            _emit_live_event(kind='upstream_event', turn=turn, payload={'seq': seq, 'event': event})
+    except Exception:
+        pass
 
 
 def append_client_event(turn: dict[str, Any] | None, event: Any) -> None:
@@ -131,6 +231,12 @@ def append_client_event(turn: dict[str, Any] | None, event: Any) -> None:
         return
     _append_stream_event(turn['stream_trace'], 'client', deep_copy_jsonable(event))
     _touch(turn)
+    try:
+        seq = int(turn['stream_trace'].get('client_total', 0))
+        if seq == 1 or _LIVE_STREAM_EVENT_SAMPLE_N <= 1 or seq % _LIVE_STREAM_EVENT_SAMPLE_N == 0:
+            _emit_live_event(kind='client_event', turn=turn, payload={'seq': seq, 'event': event})
+    except Exception:
+        pass
 
 
 def set_stream_summary(turn: dict[str, Any] | None, summary: dict[str, Any]) -> None:
@@ -139,6 +245,7 @@ def set_stream_summary(turn: dict[str, Any] | None, summary: dict[str, Any]) -> 
         return
     turn['stream_trace']['summary'] = deep_copy_jsonable(summary)
     _touch(turn)
+    _emit_live_event(kind='stream_summary', turn=turn, payload=summary)
 
 
 def attach_error(turn: dict[str, Any] | None, error: Any) -> None:
@@ -147,6 +254,7 @@ def attach_error(turn: dict[str, Any] | None, error: Any) -> None:
         return
     turn['error'] = deep_copy_jsonable(error)
     _touch(turn)
+    _emit_live_event(kind='error', turn=turn, payload=turn['error'])
 
 
 def finalize_turn(
@@ -174,6 +282,18 @@ def finalize_turn(
         summary['truncated'] = True
 
     threading.Thread(target=_write_turn, args=(deep_copy_jsonable(turn),), daemon=True).start()
+    try:
+        _emit_live_event(
+            kind='turn_done',
+            turn=turn,
+            payload={
+                'duration_ms': duration_ms,
+                'usage': usage,
+                'error': bool(turn.get('error')),
+            },
+        )
+    except Exception:
+        pass
 
 
 def sanitize_headers(headers: dict[str, Any]) -> dict[str, Any]:

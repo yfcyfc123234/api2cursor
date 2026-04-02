@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API 2 Cursor - 日志调试</title>
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="login">
+  <div class="login-card">
+    <h1>API 2 Cursor</h1>
+    <p>日志调试面板</p>
+    <div class="field">
+      <label>ACCESS_API_KEY</label>
+      <div class="input-wrap">
+        <input type="password" id="loginKey" placeholder="请输入访问密钥" onkeydown="if(event.key==='Enter')doLogin()">
+        <button class="eye" onclick="togglePwd('loginKey')">&#128065;</button>
+      </div>
+    </div>
+    <button class="btn btn-primary btn-block" onclick="doLogin()">登 录</button>
+  </div>
+</div>
+
+<!-- 仪表盘 -->
+<div id="dashboard">
+  <header>
+    <div class="container inner">
+      <h1>API 2 Cursor - 日志调试</h1>
+      <div class="right">
+        <span class="status" id="statusBadge">已连接</span>
+        <button class="btn btn-ghost btn-sm" onclick="location.href='/admin'">返回首页</button>
+        <button class="btn btn-ghost btn-sm" onclick="doLogout()">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 实时日志 -->
+    <div class="card">
+      <div class="card-header">
+        <h2>请求/响应日志（实时）</h2>
+        <span class="badge">verbose 才会产生日志</span>
+      </div>
+      <div class="hint">
+        调试 Cursor 中途中断问题时建议开启 <b>详细日志（verbose）</b>。
+        实时面板会持续推送 request/response 的过程预览（流式按序号采样）。
+      </div>
+
+      <div class="log-actions">
+        <button class="btn btn-ghost btn-sm" onclick="clearLiveLogs()">清空</button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleLivePause()" id="livePauseBtn">暂停</button>
+      </div>
+
+      <div id="liveLogs" class="log-pane">
+        <div class="empty">连接中…</div>
+      </div>
+    </div>
+
+    <!-- 历史日志 -->
+    <div class="card">
+      <div class="card-header">
+        <h2>历史日志（可查看/删除/备注）</h2>
+        <span class="badge">按会话聚合</span>
+      </div>
+
+      <div class="field" style="margin-bottom:12px">
+        <label>搜索</label>
+        <div class="input-wrap"><input type="text" id="logsSearch" placeholder="例如: conv_ / chat / responses / claude…"></div>
+      </div>
+
+      <div class="log-toolbar">
+        <button class="btn btn-ghost btn-sm" onclick="loadLogs()">刷新</button>
+        <button class="btn btn-red btn-sm" onclick="clearLogs()">清空历史</button>
+      </div>
+
+      <div class="logs-history">
+        <div class="logs-list" id="logsList">
+          <div class="empty">暂无数据</div>
+        </div>
+        <div class="logs-detail" id="logsDetail">
+          <div class="empty">请选择一条日志</div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 复用 admin.js：这里不需要模型映射弹窗 -->
+
+<div class="toast-area" id="toasts"></div>
+<script src="/static/admin.js"></script>
+</body>
+</html>
+

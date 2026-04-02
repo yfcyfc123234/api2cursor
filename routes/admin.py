@@ -8,11 +8,20 @@
 
 import os
 import logging
+import json
+import glob
+import queue
+import threading
+from typing import Any
 
 from flask import Blueprint, request, jsonify, send_from_directory
 
 import settings
 from config import Config
+from settings import DATA_DIR
+from utils.http import sse_response
+from routes.common import sse_data_message
+from utils import request_logger as request_logger_mod
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +38,13 @@ bp = Blueprint('admin', __name__)
 def admin_page():
     """返回管理面板首页 HTML 页面，供浏览器进入配置界面。"""
     return send_from_directory(_STATIC_DIR, 'admin.html')
+
+
+@bp.route('/admin/logs')
+@bp.route('/admin/logs/')
+def admin_logs_page():
+    """返回日志调试页。"""
+    return send_from_directory(_STATIC_DIR, 'admin_logs.html')
 
 
 @bp.route('/static/<path:filename>')
@@ -227,4 +243,246 @@ def _save_and_respond(data, log_msg):
         logger.error(f'保存失败: {e}')
         return jsonify({'error': {'message': f'保存失败: {e}', 'type': 'save_error'}}), 500
     logger.info(log_msg)
+    return jsonify({'ok': True})
+
+
+# ─── 实时日志 / 请求响应日志 ─────────────────────────────
+
+_LOG_DIR = os.path.join(DATA_DIR, 'conversations')
+_NOTES_FILE = os.path.join(DATA_DIR, 'log_notes.json')
+_NOTES_LOCK = threading.Lock()
+
+
+def _load_log_notes() -> dict[str, Any]:
+    with _NOTES_LOCK:
+        if not os.path.exists(_NOTES_FILE):
+            return {}
+        try:
+            with open(_NOTES_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+
+def _save_log_notes(notes: dict[str, Any]) -> None:
+    with _NOTES_LOCK:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_NOTES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(notes, f, ensure_ascii=False, indent=2)
+
+
+def _check_auth_with_query_key() -> Any | None:
+    """Admin API 鉴权：优先支持 query key（用于 EventSource 无自定义 header 场景）。"""
+    if not Config.ACCESS_API_KEY:
+        return None
+    token = request.args.get('key', '') or request.headers.get('Authorization', '')
+    if isinstance(token, str) and token.startswith('Bearer '):
+        token = token[7:]
+    if not token:
+        token = request.headers.get('x-api-key', '')
+    if token != Config.ACCESS_API_KEY:
+        return jsonify({'error': '未授权'}), 401
+    return None
+
+
+def _find_conversation_file(conversation_id: str, date: str | None = None) -> str | None:
+    if not os.path.isdir(_LOG_DIR):
+        return None
+    if date:
+        p = os.path.join(_LOG_DIR, date, f'{conversation_id}.json')
+        return p if os.path.exists(p) else None
+
+    pattern = os.path.join(_LOG_DIR, '*', f'{conversation_id}.json')
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    matches.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+    return matches[0]
+
+
+def _list_conversation_files() -> list[str]:
+    if not os.path.isdir(_LOG_DIR):
+        return []
+    pattern = os.path.join(_LOG_DIR, '*', '*.json')
+    files = glob.glob(pattern)
+    files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+    return files
+
+
+@bp.route('/api/admin/logs/live', methods=['GET'])
+def logs_live_sse():
+    """实时推送 verbose 模式下的 request/response 日志事件。"""
+    err = _check_auth_with_query_key()
+    if err:
+        return err
+
+    def gen():
+        q = request_logger_mod.register_live_subscriber()
+        try:
+            yield sse_data_message({'type': 'hello', 'message': 'live logs connected'})
+            while True:
+                try:
+                    evt = q.get(timeout=2)
+                except queue.Empty:
+                    yield sse_data_message({'type': 'ping'})
+                    continue
+                yield sse_data_message(evt)
+        finally:
+            request_logger_mod.unregister_live_subscriber(q)
+
+    return sse_response(gen())
+
+
+@bp.route('/api/admin/logs', methods=['GET'])
+def logs_list():
+    """列出最近的会话日志（历史）。"""
+    err = _check_auth()
+    if err:
+        return err
+
+    limit = int(request.args.get('limit', '30'))
+    q = (request.args.get('q') or '').strip()
+    date = (request.args.get('date') or '').strip() or None
+
+    notes = _load_log_notes()
+
+    files = _list_conversation_files()
+    if date:
+        files = [f for f in files if os.path.basename(os.path.dirname(f)) == date]
+
+    # 如果要做 q 过滤，先多读一点，避免过滤后数量不足
+    read_count = max(limit * 5, limit)
+    files = files[:read_count]
+
+    items: list[dict[str, Any]] = []
+    for fp in files:
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                doc = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        conversation_id = doc.get('conversation_id') or os.path.splitext(os.path.basename(fp))[0]
+        route_name = doc.get('route', '')
+        last_model = doc.get('last_client_model', '')
+        updated_at = doc.get('updated_at', '')
+        created_at = doc.get('created_at', '')
+        turn_count = int(doc.get('turn_count', 0) or 0)
+
+        if q:
+            q_lower = q.lower()
+            hay = ' '.join([str(conversation_id), str(route_name), str(last_model)]).lower()
+            if q_lower not in hay:
+                continue
+
+        items.append({
+            'conversation_id': conversation_id,
+            'date': os.path.basename(os.path.dirname(fp)),
+            'route': route_name,
+            'last_client_model': last_model,
+            'last_backend': doc.get('last_backend', ''),
+            'created_at': created_at,
+            'updated_at': updated_at,
+            'turn_count': turn_count,
+            'note': (notes.get(conversation_id) or {}).get('note', ''),
+        })
+
+        if len(items) >= limit:
+            break
+
+    return jsonify({'items': items})
+
+
+@bp.route('/api/admin/logs/<path:conversation_id>', methods=['GET'])
+def logs_detail(conversation_id: str):
+    """查看某个会话日志的完整内容。"""
+    err = _check_auth()
+    if err:
+        return err
+
+    date = (request.args.get('date') or '').strip() or None
+    fp = _find_conversation_file(conversation_id, date)
+    if not fp:
+        return jsonify({'error': '日志不存在'}), 404
+
+    try:
+        with open(fp, 'r', encoding='utf-8') as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return jsonify({'error': '日志读取失败'}), 500
+
+    notes = _load_log_notes()
+    note_entry = notes.get(conversation_id) or {}
+    return jsonify({
+        'conversation': doc,
+        'note': note_entry.get('note', ''),
+    })
+
+
+@bp.route('/api/admin/logs/<path:conversation_id>', methods=['DELETE'])
+def logs_delete(conversation_id: str):
+    """删除某个会话日志文件。"""
+    err = _check_auth()
+    if err:
+        return err
+
+    date = (request.args.get('date') or '').strip() or None
+    fp = _find_conversation_file(conversation_id, date)
+    if not fp:
+        return jsonify({'ok': True})
+
+    try:
+        os.remove(fp)
+    except OSError as e:
+        return jsonify({'error': {'message': f'delete failed: {e}', 'type': 'delete_error'}}), 500
+
+    notes = _load_log_notes()
+    if conversation_id in notes:
+        notes.pop(conversation_id, None)
+        _save_log_notes(notes)
+
+    return jsonify({'ok': True})
+
+
+@bp.route('/api/admin/logs/clear', methods=['POST'])
+def logs_clear():
+    """清空历史会话日志目录。"""
+    err = _check_auth()
+    if err:
+        return err
+
+    data = request.get_json(force=True, silent=True) or {}
+    if not data.get('confirm'):
+        return jsonify({'error': '需要 confirm=true 才能清空'}), 400
+
+    if os.path.isdir(_LOG_DIR):
+        files = glob.glob(os.path.join(_LOG_DIR, '*', '*.json'))
+        for fp in files:
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+
+    return jsonify({'ok': True})
+
+
+@bp.route('/api/admin/logs/<path:conversation_id>/note', methods=['PUT'])
+def logs_update_note(conversation_id: str):
+    """为某个会话日志添加/更新备注。"""
+    err = _check_auth()
+    if err:
+        return err
+
+    data = request.get_json(force=True, silent=True) or {}
+    note = str(data.get('note') or '')
+    if len(note) > 2000:
+        return jsonify({'error': 'note too long (max 2000)'}), 400
+
+    notes = _load_log_notes()
+    entry = notes.get(conversation_id) or {}
+    entry['note'] = note
+    notes[conversation_id] = entry
+    _save_log_notes(notes)
+
     return jsonify({'ok': True})
