@@ -82,6 +82,8 @@ async function loadDashboard() {
     if (mxAppIdEl) mxAppIdEl.value = s.mxnzp_app_id || '';
     const mxAppSecretEl = document.getElementById('mxnzpAppSecret');
     if (mxAppSecretEl) mxAppSecretEl.value = s.mxnzp_app_secret || '';
+    const fxRateApiUrlEl = document.getElementById('fxRateApiUrl');
+    if (fxRateApiUrlEl) fxRateApiUrlEl.value = s.fx_rate_api_url || '';
     const debugModeEl = document.getElementById('debugMode');
     if (debugModeEl) debugModeEl.value = s.debug_mode || 'off';
     const envUrlEl = document.getElementById('envUrl');
@@ -330,6 +332,7 @@ async function saveSettings() {
         proxy_api_key: document.getElementById('proxyKey').value.trim(),
         mxnzp_app_id: document.getElementById('mxnzpAppId').value.trim(),
         mxnzp_app_secret: document.getElementById('mxnzpAppSecret').value.trim(),
+        fx_rate_api_url: document.getElementById('fxRateApiUrl').value.trim(),
         debug_mode: document.getElementById('debugMode').value,
       }),
     });

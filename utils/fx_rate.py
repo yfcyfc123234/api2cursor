@@ -37,11 +37,13 @@ def _api_credentials() -> tuple[str | None, str | None, str]:
     s = settings.get()
     app_id_cfg = str(s.get("mxnzp_app_id") or "").strip()
     app_secret_cfg = str(s.get("mxnzp_app_secret") or "").strip()
+    api_url_cfg = str(s.get("fx_rate_api_url") or "").strip()
     app_id_env = os.getenv("MXNZP_APP_ID", "").strip()
     app_secret_env = os.getenv("MXNZP_APP_SECRET", "").strip()
     app_id = app_id_cfg or app_id_env
     app_secret = app_secret_cfg or app_secret_env
-    url = os.getenv("FX_RATE_API_URL", "https://www.mxnzp.com/api/exchange_rate/list").strip()
+    api_url_env = os.getenv("FX_RATE_API_URL", "https://www.mxnzp.com/api/exchange_rate/list").strip()
+    url = api_url_cfg or api_url_env
     return (app_id or None), (app_secret or None), url
 
 

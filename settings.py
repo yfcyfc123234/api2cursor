@@ -27,6 +27,8 @@ _DEFAULTS = {
     # 实时汇率（可在管理面板配置，优先于环境变量 MXNZP_APP_ID / MXNZP_APP_SECRET）
     'mxnzp_app_id': '',
     'mxnzp_app_secret': '',
+    # 汇率接口连接地址（可选；留空则用环境变量 FX_RATE_API_URL 或默认值）
+    'fx_rate_api_url': '',
 }
 
 

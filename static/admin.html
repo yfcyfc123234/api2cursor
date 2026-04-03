@@ -69,6 +69,11 @@
         <div class="hint">用于调用 mxnzp 实时汇率接口，仅用于 RMB 预估；实际结算以支付渠道汇率为准。</div>
       </div>
       <div class="field">
+        <label>汇率 API 地址 <span style="color:var(--muted)">（可留空，默认 mxnzp 接口）</span></label>
+        <div class="input-wrap"><input type="text" id="fxRateApiUrl" placeholder="https://www.mxnzp.com/api/exchange_rate/list"></div>
+        <div class="hint">可覆盖环境变量 `FX_RATE_API_URL`；用于 USD→CNY 汇率获取。</div>
+      </div>
+      <div class="field">
         <label>日志模式</label>
         <div class="input-wrap">
           <select id="debugMode">
