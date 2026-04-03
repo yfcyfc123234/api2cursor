@@ -70,7 +70,7 @@ from utils.request_logger import (
     start_turn,
 )
 from utils.think_tag import ThinkTagExtractor
-from utils.thinking_cache import thinking_cache
+from utils.thinking_cache import fold_chat_completion_stream_chunks, thinking_cache
 from utils.usage_tracker import usage_tracker
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,15 @@ def _dbg(message: str) -> None:
     """仅在调试模式下输出详细日志。"""
     if settings.get_debug_mode() in ('simple', 'verbose'):
         logger.info('[聊天补全调试] %s', message)
+
+
+def _remember_assistant_thinking_openai_stream(
+    payload: dict[str, Any], client_chunks: list[dict[str, Any]]
+) -> None:
+    """OpenAI 兼容流式结束后，把本轮 assistant 的 reasoning/tool 形态写入缓存供下一轮 inject。"""
+    folded = fold_chat_completion_stream_chunks(client_chunks)
+    if folded:
+        thinking_cache.store_assistant_thinking(payload.get('messages', []), folded)
 
 
 def _extract_responses_usage(event_data: dict[str, Any]) -> dict[str, Any] | None:
@@ -245,6 +254,7 @@ def _handle_openai_stream(
                     yield sse_data_message(close_chunk)
                 append_client_event(turn, {'type': 'done'})
                 yield sse_data_message('[DONE]')
+                _remember_assistant_thinking_openai_stream(payload, client_chunks)
                 usage_tracker.record(ctx.client_model, last_usage)
                 set_stream_summary(turn, {
                     'chunk_count': chunk_count,
@@ -285,6 +295,7 @@ def _handle_openai_stream(
 
             chunk_count += 1
 
+        _remember_assistant_thinking_openai_stream(payload, client_chunks)
         usage_tracker.record(ctx.client_model, last_usage)
         set_stream_summary(turn, {
             'chunk_count': chunk_count,
@@ -698,14 +709,12 @@ def _finalize_chat_response(
     attach_client_response(turn, data)
     finalize_turn(turn, usage=data.get('usage'))
 
+    req_msgs = request.get_json(silent=True, force=True).get('messages', [])
     for choice in data.get('choices', []):
         msg = choice.get('message', {})
-        if msg.get('reasoning_content'):
-            thinking_cache.store_from_response(
-                request.get_json(silent=True, force=True).get('messages', []),
-                msg['reasoning_content'],
-            )
-            break
+        if msg.get('reasoning_content') or msg.get('tool_calls'):
+            thinking_cache.store_assistant_thinking(req_msgs, msg)
+        break
 
     return jsonify(data)
 
