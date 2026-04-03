@@ -107,6 +107,8 @@ def get_settings():
         'proxy_target_url': s.get('proxy_target_url', ''),
         'proxy_api_key': s.get('proxy_api_key', ''),
         'debug_mode': s.get('debug_mode', '') or Config.DEBUG_MODE,
+        'mxnzp_app_id': s.get('mxnzp_app_id', ''),
+        'mxnzp_app_secret': s.get('mxnzp_app_secret', ''),
         'env_target_url': Config.PROXY_TARGET_URL,
         'env_api_key': '***' if Config.PROXY_API_KEY else '',
     })
@@ -120,7 +122,7 @@ def update_settings():
         return err
     data = request.get_json(force=True)
     s = settings.get()
-    for key in ('proxy_target_url', 'proxy_api_key', 'debug_mode'):
+    for key in ('proxy_target_url', 'proxy_api_key', 'debug_mode', 'mxnzp_app_id', 'mxnzp_app_secret'):
         if key in data:
             s[key] = data[key]
     return _save_and_respond(s, '全局设置已更新')
@@ -220,8 +222,19 @@ def get_stats():
         return err
     from utils.usage_tracker import usage_tracker
     from utils.model_pricing import enrich_usage_stats
+    from utils.fx_rate import get_usd_cny_rate
 
-    return jsonify(enrich_usage_stats(usage_tracker.get_stats()))
+    stats = enrich_usage_stats(usage_tracker.get_stats())
+    rate, meta = get_usd_cny_rate()
+    stats['fx'] = {
+        'usd_cny': rate,
+        'source': meta.get('source'),
+        'updated_at': meta.get('updated_at'),
+        'api_url': meta.get('api_url'),
+        'note': meta.get('note'),
+        'disabled': bool(meta.get('disabled')),
+    }
+    return jsonify(stats)
 
 
 @bp.route('/api/admin/pricing', methods=['GET'])
@@ -246,6 +259,25 @@ def reload_model_pricing():
     invalidate_cache()
     _, meta = load_document()
     return jsonify({'ok': True, 'meta': meta})
+
+
+@bp.route('/api/admin/fx-rate', methods=['GET'])
+def get_fx_rate():
+    """单独查询一次 USD→CNY 汇率（供前端手动刷新）。"""
+    err = _check_auth()
+    if err:
+        return err
+    from utils.fx_rate import get_usd_cny_rate
+
+    rate, meta = get_usd_cny_rate()
+    return jsonify({
+        'usd_cny': rate,
+        'source': meta.get('source'),
+        'updated_at': meta.get('updated_at'),
+        'api_url': meta.get('api_url'),
+        'note': meta.get('note') or '仅供估算，实际以支付渠道汇率为准。',
+        'disabled': bool(meta.get('disabled')),
+    })
 
 
 # ─── 配置导入 / 导出 ──────────────────────────────────
@@ -282,6 +314,8 @@ def import_config():
         'proxy_api_key',
         'debug_mode',
         'model_mappings',
+        'mxnzp_app_id',
+        'mxnzp_app_secret',
     }
     cleaned: dict[str, Any] = {}
     for k in allowed_top:

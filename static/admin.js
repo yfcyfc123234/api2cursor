@@ -69,6 +69,8 @@ function doLogout() {
 }
 
 // ─── 仪表盘 ─────────────────────────────────────────
+let fxRateUsdCny = null;
+
 async function loadDashboard() {
   try {
     const s = await api('/api/admin/settings');
@@ -76,6 +78,10 @@ async function loadDashboard() {
     if (targetUrlEl) targetUrlEl.value = s.proxy_target_url || '';
     const proxyKeyEl = document.getElementById('proxyKey');
     if (proxyKeyEl) proxyKeyEl.value = s.proxy_api_key || '';
+    const mxAppIdEl = document.getElementById('mxnzpAppId');
+    if (mxAppIdEl) mxAppIdEl.value = s.mxnzp_app_id || '';
+    const mxAppSecretEl = document.getElementById('mxnzpAppSecret');
+    if (mxAppSecretEl) mxAppSecretEl.value = s.mxnzp_app_secret || '';
     const debugModeEl = document.getElementById('debugMode');
     if (debugModeEl) debugModeEl.value = s.debug_mode || 'off';
     const envUrlEl = document.getElementById('envUrl');
@@ -88,6 +94,14 @@ async function loadDashboard() {
 
     const statusBadgeEl = document.getElementById('statusBadge');
     if (statusBadgeEl) checkHealth();
+
+    // 尝试预加载一次汇率（忽略错误）
+    try {
+      const fx = await api('/api/admin/fx-rate');
+      fxRateUsdCny = fx;
+    } catch {
+      fxRateUsdCny = null;
+    }
 
     const statsContentEl = document.getElementById('statsContent');
     if (statsContentEl) loadStats();
@@ -106,6 +120,19 @@ function formatMoney(n, sym) {
   if (n == null || n === '' || Number.isNaN(Number(n))) return '—';
   const prefix = sym ? String(sym) : '';
   return prefix + Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+}
+
+function formatUsdWithCnyTooltip(usd, sym) {
+  const amount = Number(usd || 0);
+  const show = !Number.isNaN(amount) && amount !== 0;
+  const text = show ? formatMoney(amount, sym) : '—';
+  if (!fxRateUsdCny || !fxRateUsdCny.usd_cny || !show) return esc(text);
+  const rate = Number(fxRateUsdCny.usd_cny);
+  if (!rate || Number.isNaN(rate)) return esc(text);
+  const cny = amount * rate;
+  const updated = fxRateUsdCny.updated_at ? String(fxRateUsdCny.updated_at) : '';
+  const tip = `约 ¥${cny.toFixed(2)}（按 USD→CNY ${rate.toFixed(4)}，${updated || '最近一次同步'}，仅供参考）`;
+  return `<span class="price-with-tip" title="${esc(tip)}">${esc(text)}</span>`;
 }
 
 async function loadStats() {
@@ -130,13 +157,21 @@ async function loadStats() {
     } else {
       hintLine += ' · 合计预估: —（请配置仓库根目录 model_pricing.json 或 MODEL_PRICING_PATH）';
     }
-    const sub = '仅供参考，以云厂商账单为准。' + (pr.file_error ? ' 定价文件: ' + esc(pr.file_error) : '');
+    const fx = data.fx || {};
+    let sub = '仅供参考，以云厂商账单为准。';
+    if (fx && fx.usd_cny) {
+      sub += ' 汇率: 1 USD ≈ ' + Number(fx.usd_cny).toFixed(4) + ' CNY';
+      if (fx.updated_at) sub += '（' + esc(String(fx.updated_at)) + ' 同步）';
+    }
+    if (pr.file_error) {
+      sub += ' 定价文件: ' + esc(pr.file_error);
+    }
     let html = '<div class="hint" style="margin-bottom:12px">' + hintLine + '<div class="pricing-sub">' + sub + '</div></div>';
     html += '<table class="stats-table"><thead><tr><th>模型</th><th>请求数</th><th>输入 Tokens</th><th>输出 Tokens</th><th>总 Tokens</th><th>预估费用</th><th>定价匹配</th><th>定价页</th></tr></thead><tbody>';
     keys.sort((a, b) => models[b].request_count - models[a].request_count);
     for (const name of keys) {
       const s = models[name];
-      const cost = s.priced ? formatMoney(s.estimated_cost, sym) : '—';
+      const costHtml = s.priced ? formatUsdWithCnyTooltip(s.estimated_cost, sym) : esc('—');
       let matchCell = '<span style="color:var(--muted)">未配置</span>';
       if (s.pricing_match === 'exact') matchCell = '表内同名';
       else if (s.pricing_match === 'alias') matchCell = '别名 → ' + esc(s.pricing_model_key || '');
@@ -145,7 +180,7 @@ async function loadStats() {
       const linkCell = src
         ? '<a class="pricing-src-link" href="' + esc(src) + '" target="_blank" rel="noopener noreferrer">打开</a>'
         : '<span style="color:var(--muted)">—</span>';
-      html += '<tr><td>' + esc(name) + '</td><td>' + s.request_count + '</td><td>' + s.input_tokens.toLocaleString() + '</td><td>' + s.output_tokens.toLocaleString() + '</td><td>' + s.total_tokens.toLocaleString() + '</td><td>' + cost + '</td><td>' + matchCell + '</td><td>' + linkCell + '</td></tr>';
+      html += '<tr><td>' + esc(name) + '</td><td>' + s.request_count + '</td><td>' + s.input_tokens.toLocaleString() + '</td><td>' + s.output_tokens.toLocaleString() + '</td><td>' + s.total_tokens.toLocaleString() + '</td><td>' + costHtml + '</td><td>' + matchCell + '</td><td>' + linkCell + '</td></tr>';
     }
     html += '</tbody></table>';
     el.innerHTML = html;
@@ -293,6 +328,8 @@ async function saveSettings() {
       body: JSON.stringify({
         proxy_target_url: document.getElementById('targetUrl').value.trim(),
         proxy_api_key: document.getElementById('proxyKey').value.trim(),
+        mxnzp_app_id: document.getElementById('mxnzpAppId').value.trim(),
+        mxnzp_app_secret: document.getElementById('mxnzpAppSecret').value.trim(),
         debug_mode: document.getElementById('debugMode').value,
       }),
     });

@@ -24,6 +24,9 @@ _DEFAULTS = {
     'proxy_api_key': '',
     'debug_mode': '',
     'model_mappings': {},
+    # 实时汇率（可在管理面板配置，优先于环境变量 MXNZP_APP_ID / MXNZP_APP_SECRET）
+    'mxnzp_app_id': '',
+    'mxnzp_app_secret': '',
 }
 
 

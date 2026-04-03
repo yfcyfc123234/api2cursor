@@ -57,6 +57,18 @@
         <div class="hint" id="envKey"></div>
       </div>
       <div class="field">
+        <label>MXNZP APPID <span style="color:var(--muted)">（用于汇率 USD→CNY 估算，可留空）</span></label>
+        <div class="input-wrap"><input type="text" id="mxnzpAppId" placeholder="hewfrypmvnkxnzio"></div>
+      </div>
+      <div class="field">
+        <label>MXNZP APPSECRET</label>
+        <div class="input-wrap">
+          <input type="password" id="mxnzpAppSecret" placeholder="只存于服务器 settings.json，可通过导入/导出迁移">
+          <button class="eye" onclick="togglePwd('mxnzpAppSecret')">&#128065;</button>
+        </div>
+        <div class="hint">用于调用 mxnzp 实时汇率接口，仅用于 RMB 预估；实际结算以支付渠道汇率为准。</div>
+      </div>
+      <div class="field">
         <label>日志模式</label>
         <div class="input-wrap">
           <select id="debugMode">
