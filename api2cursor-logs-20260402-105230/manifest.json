@@ -1,0 +1,9 @@
+{
+  "type": "api2cursor_logs_export",
+  "version": 1,
+  "exported_at": "2026-04-02T10:52:30Z",
+  "export_all": true,
+  "time_range": null,
+  "session_file_count": 2,
+  "verbose_full_stream_env": ""
+}

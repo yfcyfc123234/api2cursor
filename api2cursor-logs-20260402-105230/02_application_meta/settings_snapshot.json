@@ -1,0 +1,17 @@
+{
+  "proxy_target_url": "https://88996.cloud/",
+  "proxy_api_key": "sk-DXfaEU5q8B5iRiXtGxwBzgX4BaHXCzJ9AWeipdf8Kap6Zgeq",
+  "debug_mode": "verbose",
+  "model_mappings": {
+    "glm-km-k2.5": {
+      "upstream_model": "kimi-k2.5",
+      "backend": "auto",
+      "target_url": "https://api.moonshot.cn/",
+      "api_key": "sk-U2wjRHZsEVfN1leEQF3Djua3Ab2ATTv4rCzoORnV6ZMRz3pe",
+      "custom_instructions": "",
+      "instructions_position": "prepend",
+      "body_modifications": {},
+      "header_modifications": {}
+    }
+  }
+}
