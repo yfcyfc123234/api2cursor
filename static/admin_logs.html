@@ -112,7 +112,20 @@
   </main>
 </div>
 
-<!-- 复用 admin.js：这里不需要模型映射弹窗 -->
+<!-- 清空历史进度 -->
+<div class="modal-overlay" id="clearProgressModal" aria-hidden="true">
+  <div class="modal" style="width:440px" onclick="event.stopPropagation()">
+    <h3 id="clearProgressTitle">正在清空历史日志</h3>
+    <p id="clearProgressText" class="hint" style="margin-top:0;color:var(--text)">准备中…</p>
+    <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="clearProgressTrack">
+      <div class="progress-fill" id="clearProgressBarInner"></div>
+    </div>
+    <div class="clear-progress-detail" id="clearProgressDetail"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-primary" id="clearProgressClose" disabled onclick="closeClearProgressModal()">关闭</button>
+    </div>
+  </div>
+</div>
 
 <div class="toast-area" id="toasts"></div>
 <script src="/static/admin.js"></script>

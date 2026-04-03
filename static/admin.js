@@ -731,17 +731,166 @@ async function saveLogNote() {
   }
 }
 
+function openClearProgressModal() {
+  const el = document.getElementById('clearProgressModal');
+  if (!el) return;
+  el.classList.add('active');
+  el.setAttribute('aria-hidden', 'false');
+  const bar = document.getElementById('clearProgressBarInner');
+  const track = document.getElementById('clearProgressTrack');
+  if (bar) bar.style.width = '0%';
+  if (track) track.setAttribute('aria-valuenow', '0');
+  const t = document.getElementById('clearProgressText');
+  if (t) t.textContent = '正在连接服务器…';
+  const d = document.getElementById('clearProgressDetail');
+  if (d) d.textContent = '';
+  const c = document.getElementById('clearProgressClose');
+  if (c) c.disabled = true;
+}
+
+function closeClearProgressModal() {
+  const el = document.getElementById('clearProgressModal');
+  if (!el) return;
+  el.classList.remove('active');
+  el.setAttribute('aria-hidden', 'true');
+}
+
+function applyClearProgressPayload(msg) {
+  const bar = document.getElementById('clearProgressBarInner');
+  const track = document.getElementById('clearProgressTrack');
+  const text = document.getElementById('clearProgressText');
+  const detail = document.getElementById('clearProgressDetail');
+  if (!msg || typeof msg !== 'object') return;
+
+  if (msg.phase === 'start') {
+    if (text) {
+      text.textContent =
+        msg.total === 0
+          ? '没有需要删除的日志文件'
+          : '共 ' + msg.total + ' 个文件，开始删除…';
+    }
+    if (bar) bar.style.width = msg.total ? '3%' : '100%';
+    if (track) track.setAttribute('aria-valuenow', msg.total ? '3' : '100');
+  } else if (msg.phase === 'progress') {
+    const pct = msg.total ? Math.min(100, Math.round((msg.done / msg.total) * 100)) : 100;
+    if (bar) bar.style.width = pct + '%';
+    if (track) track.setAttribute('aria-valuenow', String(pct));
+    if (text) text.textContent = '已删除 ' + msg.done + ' / ' + msg.total;
+    if (detail) {
+      let s = '';
+      if (msg.errors) s += '失败 ' + msg.errors + ' 个。';
+      if (msg.current) s += (s ? ' ' : '') + '当前：' + msg.current;
+      detail.textContent = s;
+    }
+  } else if (msg.phase === 'done') {
+    if (bar) bar.style.width = '100%';
+    if (track) track.setAttribute('aria-valuenow', '100');
+    if (text) {
+      text.textContent =
+        '完成：成功删除 ' +
+        msg.removed +
+        ' 个' +
+        (msg.errors ? '，失败 ' + msg.errors + ' 个' : '');
+    }
+    if (detail) detail.textContent = '';
+  } else if (msg.phase === 'error') {
+    if (text) text.textContent = '出错';
+    if (detail) detail.textContent = msg.message || '未知错误';
+  }
+}
+
 async function clearLogs() {
   if (!confirm('确定要清空历史日志吗？这会删除服务器上的 conversations json 文件。')) return;
+
+  const hasModal = !!document.getElementById('clearProgressModal');
+  if (!hasModal) {
+    try {
+      await api('/api/admin/logs/clear', {
+        method: 'POST',
+        body: JSON.stringify({ confirm: true }),
+      });
+      toast('历史日志已清空');
+      currentLogId = null;
+      await loadLogs();
+    } catch (e) {
+      toast('清空失败: ' + e.message, false);
+    }
+    return;
+  }
+
+  openClearProgressModal();
+  let streamError = null;
   try {
-    await api('/api/admin/logs/clear', {
+    const headers = { 'Content-Type': 'application/json' };
+    if (authKey) headers['Authorization'] = 'Bearer ' + authKey;
+    const res = await fetch(API + '/api/admin/logs/clear', {
       method: 'POST',
+      headers,
       body: JSON.stringify({ confirm: true }),
     });
+
+    if (!res.ok) {
+      const text = await res.text();
+      let errMsg = 'HTTP ' + res.status;
+      try {
+        const j = JSON.parse(text);
+        errMsg =
+          (j.error && (j.error.message || j.error)) ||
+          j.message ||
+          j.error ||
+          errMsg;
+      } catch {
+        if (text) errMsg = text.substring(0, 200);
+      }
+      throw new Error(errMsg);
+    }
+
+    const reader = res.body && res.body.getReader();
+    if (!reader) throw new Error('无法读取响应流');
+
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (let li = 0; li < lines.length; li++) {
+        const line = lines[li].trim();
+        if (!line) continue;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        applyClearProgressPayload(msg);
+        if (msg.phase === 'error') streamError = new Error(msg.message || '清空失败');
+      }
+    }
+    const tail = buf.trim();
+    if (tail) {
+      try {
+        const msg = JSON.parse(tail);
+        applyClearProgressPayload(msg);
+        if (msg.phase === 'error') streamError = new Error(msg.message || '清空失败');
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (streamError) throw streamError;
+
+    const closeBtn = document.getElementById('clearProgressClose');
+    if (closeBtn) closeBtn.disabled = false;
     toast('历史日志已清空');
     currentLogId = null;
     await loadLogs();
   } catch (e) {
+    applyClearProgressPayload({ phase: 'error', message: e.message || String(e) });
+    const closeBtn = document.getElementById('clearProgressClose');
+    if (closeBtn) closeBtn.disabled = false;
     toast('清空失败: ' + e.message, false);
   }
 }

@@ -17,7 +17,7 @@ import zipfile
 from datetime import datetime, timezone
 from typing import Any
 
-from flask import Blueprint, request, jsonify, send_from_directory, send_file
+from flask import Blueprint, request, jsonify, send_from_directory, send_file, Response, stream_with_context
 
 import settings
 from config import Config
@@ -647,7 +647,7 @@ def logs_delete(conversation_id: str):
 
 @bp.route('/api/admin/logs/clear', methods=['POST'])
 def logs_clear():
-    """清空历史会话日志目录。"""
+    """清空历史会话日志目录，以 NDJSON 流式返回进度（每行一个 JSON 对象）。"""
     err = _check_auth()
     if err:
         return err
@@ -656,15 +656,68 @@ def logs_clear():
     if not data.get('confirm'):
         return jsonify({'error': '需要 confirm=true 才能清空'}), 400
 
-    if os.path.isdir(_LOG_DIR):
-        files = glob.glob(os.path.join(_LOG_DIR, '*', '*.json'))
-        for fp in files:
-            try:
-                os.remove(fp)
-            except OSError:
-                pass
+    def ndjson_progress():
+        try:
+            if not os.path.isdir(_LOG_DIR):
+                yield json.dumps(
+                    {'phase': 'start', 'total': 0}, ensure_ascii=False
+                ) + '\n'
+                yield json.dumps(
+                    {'phase': 'done', 'removed': 0, 'errors': 0, 'total': 0},
+                    ensure_ascii=False,
+                ) + '\n'
+                return
 
-    return jsonify({'ok': True})
+            files = glob.glob(os.path.join(_LOG_DIR, '*', '*.json'))
+            total = len(files)
+            yield json.dumps({'phase': 'start', 'total': total}, ensure_ascii=False) + '\n'
+
+            errors = 0
+            removed = 0
+            # 进度推送次数约 ≤100，避免海量文件时刷屏
+            step = max(1, total // 100) if total > 0 else 1
+
+            for i, fp in enumerate(files):
+                try:
+                    os.remove(fp)
+                    removed += 1
+                except OSError:
+                    errors += 1
+
+                done = i + 1
+                if done == total or done % step == 0 or total <= 20:
+                    yield json.dumps(
+                        {
+                            'phase': 'progress',
+                            'done': done,
+                            'total': total,
+                            'errors': errors,
+                            'current': os.path.basename(fp),
+                        },
+                        ensure_ascii=False,
+                    ) + '\n'
+
+            yield json.dumps(
+                {
+                    'phase': 'done',
+                    'removed': removed,
+                    'errors': errors,
+                    'total': total,
+                },
+                ensure_ascii=False,
+            ) + '\n'
+        except Exception as e:
+            logger.exception('清空历史日志异常')
+            yield json.dumps({'phase': 'error', 'message': str(e)}, ensure_ascii=False) + '\n'
+
+    return Response(
+        stream_with_context(ndjson_progress()),
+        mimetype='application/x-ndjson; charset=utf-8',
+        headers={
+            'Cache-Control': 'no-store',
+            'X-Accel-Buffering': 'no',
+        },
+    )
 
 
 @bp.route('/api/admin/logs/<path:conversation_id>/note', methods=['PUT'])
