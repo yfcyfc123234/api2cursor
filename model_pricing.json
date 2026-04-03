@@ -2,9 +2,30 @@
   "schema_version": 2,
   "currency": "USD",
   "currency_symbol": "$",
-  "note": "单价为每 1M tokens（美元）。各模型 source_url 为摘录依据；官方页多为动态表格，数字参考 Moonshot 官方 API 档位汇总（2026-04）；上下文缓存命中价未计入估算，结算以 Kimi 控制台为准。",
-  "updated_at": "2026-04-02",
-  "aliases": {},
+  "note": "单价为每 1M tokens（美元）。Input + Cache Write 按文档口径合并计价；由于当前用量统计仅能拿到 input/output tokens，Cache Read（缓存读取）未单独计价，属于估算偏保守/偏差可能存在。各模型 source_url 为摘录依据；结算以厂商/渠道账单为准。",
+  "updated_at": "2026-04-03",
+  "aliases": {
+    "composer-2": "Cursor Composer 2",
+    "cursor-composer-2": "Cursor Composer 2",
+    "Cursor Composer 2": "Cursor Composer 2",
+    "composer-2-fast": "Cursor Composer 2 (Fast)",
+    "cursor-composer-2-fast": "Cursor Composer 2 (Fast)",
+    "Composer 2 (Fast)": "Cursor Composer 2 (Fast)",
+    "Claude 4.6 Opus": "Claude 4.6 Opus",
+    "claude-4.6-opus": "Claude 4.6 Opus",
+    "claude-opus-4.6": "Claude 4.6 Opus",
+    "Claude 4.6 Sonnet": "Claude 4.6 Sonnet",
+    "claude-4.6-sonnet": "Claude 4.6 Sonnet",
+    "claude-sonnet-4.6": "Claude 4.6 Sonnet",
+    "Gemini 3.1 Pro": "Gemini 3.1 Pro",
+    "gemini-3.1-pro": "Gemini 3.1 Pro",
+    "GPT-5.3 Codex": "GPT-5.3 Codex",
+    "gpt-5.3-codex": "GPT-5.3 Codex",
+    "GPT-5.4": "GPT-5.4",
+    "gpt-5.4": "GPT-5.4",
+    "Grok 4.20": "Grok 4.20",
+    "grok-4.20": "Grok 4.20"
+  },
   "providers": [
     {
       "id": "moonshot",
@@ -88,6 +109,122 @@
               "input_per_million": 2.0,
               "output_per_million": 5.0,
               "source_url": "https://platform.kimi.com/docs/pricing/chat"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor（Auto + Composer / Composer 池）",
+      "series": [
+        {
+          "id": "cursor-composer-2",
+          "name": "Composer 2 系列",
+          "models": [
+            {
+              "id": "Cursor Composer 2",
+              "name": "Cursor Composer 2",
+              "input_per_million": 0.5,
+              "output_per_million": 2.5,
+              "source_url": "https://cursor.com/cn/docs/models-and-pricing"
+            },
+            {
+              "id": "Cursor Composer 2 (Fast)",
+              "name": "Cursor Composer 2 (Fast)",
+              "input_per_million": 1.5,
+              "output_per_million": 7.5,
+              "source_url": "https://cursor.com/cn/docs/models-and-pricing"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic（API 池）",
+      "series": [
+        {
+          "id": "claude-4.6",
+          "name": "Claude 4.6 系列",
+          "models": [
+            {
+              "id": "Claude 4.6 Opus",
+              "name": "Claude 4.6 Opus",
+              "input_per_million": 11.25,
+              "output_per_million": 25,
+              "source_url": "https://cursor.com/cn/docs/models-and-pricing"
+            },
+            {
+              "id": "Claude 4.6 Sonnet",
+              "name": "Claude 4.6 Sonnet",
+              "input_per_million": 6.75,
+              "output_per_million": 15,
+              "source_url": "https://cursor.com/cn/docs/models-and-pricing"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "google",
+      "name": "Google（API 池）",
+      "series": [
+        {
+          "id": "gemini-3.1",
+          "name": "Gemini 3.1 系列",
+          "models": [
+            {
+              "id": "Gemini 3.1 Pro",
+              "name": "Gemini 3.1 Pro",
+              "input_per_million": 2,
+              "output_per_million": 12,
+              "source_url": "https://cursor.com/cn/docs/models-and-pricing"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "name": "OpenAI（API 池）",
+      "series": [
+        {
+          "id": "gpt-5",
+          "name": "GPT-5 系列",
+          "models": [
+            {
+              "id": "GPT-5.3 Codex",
+              "name": "GPT-5.3 Codex",
+              "input_per_million": 1.75,
+              "output_per_million": 14,
+              "source_url": "https://cursor.com/cn/docs/models-and-pricing"
+            },
+            {
+              "id": "GPT-5.4",
+              "name": "GPT-5.4",
+              "input_per_million": 2.5,
+              "output_per_million": 15,
+              "source_url": "https://cursor.com/cn/docs/models-and-pricing"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "xai",
+      "name": "xAI（API 池）",
+      "series": [
+        {
+          "id": "grok-4",
+          "name": "Grok 4.x 系列",
+          "models": [
+            {
+              "id": "Grok 4.20",
+              "name": "Grok 4.20",
+              "input_per_million": 2,
+              "output_per_million": 6,
+              "source_url": "https://cursor.com/cn/docs/models-and-pricing"
             }
           ]
         }

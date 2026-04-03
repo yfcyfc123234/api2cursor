@@ -66,6 +66,8 @@
 
 `费用 = (input_tokens / 1e6) * input_per_million + (output_tokens / 1e6) * output_per_million`
 
+说明：当前用量统计没有把缓存读取（Cache Read）拆成单独 token 计数，因此 `input_per_million` 默认按文档的 **Input + Cache Write** 口径合并来估算；Cache Read 未单独计价，属于估算可能偏差。
+
 未匹配到模型或未配置单价时，该模型不计入「合计预估」。
 
 ## 工作流（AI 填价 + Git + 部署）

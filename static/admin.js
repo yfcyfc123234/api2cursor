@@ -203,6 +203,23 @@ async function reloadPricingFromDisk() {
   }
 }
 
+async function testFxRate() {
+  try {
+    const fx = await api('/api/admin/fx-rate');
+    fxRateUsdCny = fx;
+    if (fx && fx.usd_cny) {
+      const msg = `汇率测试成功：1 USD ≈ ${Number(fx.usd_cny).toFixed(4)} CNY（${fx.updated_at || '最近一次同步'}，仅供参考）`;
+      toast(msg, true);
+      const statsContentEl = document.getElementById('statsContent');
+      if (statsContentEl) loadStats();
+    } else {
+      toast('请求成功，但未返回 USD→CNY 汇率，请检查 APPID/SECRET 与 API 地址', false);
+    }
+  } catch (e) {
+    toast('汇率测试失败: ' + (e.message || e), false);
+  }
+}
+
 function pricingSrcButton(url) {
   const u = (url || '').trim();
   if (!u) return '<span style="color:var(--muted)">—</span>';
@@ -252,9 +269,9 @@ async function openPricingModal() {
             const mlabel = esc(String(m.name || m.id || ''));
             const pi = m.input_per_million;
             const po = m.output_per_million;
-            const piS = pi != null && pi !== '' ? esc(String(pi)) : '—';
-            const poS = po != null && po !== '' ? esc(String(po)) : '—';
-            body += '<tr><td><code>' + mid + '</code></td><td>' + mlabel + '</td><td>' + piS + '</td><td>' + poS + '</td><td>' + pricingSrcButton(m.source_url) + '</td></tr>';
+            const piHtml = (pi != null && pi !== '') ? formatUsdWithCnyTooltip(pi, '$') : esc('—');
+            const poHtml = (po != null && po !== '') ? formatUsdWithCnyTooltip(po, '$') : esc('—');
+            body += '<tr><td><code>' + mid + '</code></td><td>' + mlabel + '</td><td>' + piHtml + '</td><td>' + poHtml + '</td><td>' + pricingSrcButton(m.source_url) + '</td></tr>';
           }
           body += '</tbody></table></div></details>';
         }
