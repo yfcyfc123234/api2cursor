@@ -5,6 +5,7 @@ services:
       - "${PROXY_PORT:-3029}:${PROXY_PORT:-3029}"
     env_file:
       - .env
+    # 挂到容器内 DATA_DIR（与 settings.json 同级，见 settings.py / doc/conversation-index-and-docker.md）
     volumes:
       - ./data:/app/data
     restart: unless-stopped

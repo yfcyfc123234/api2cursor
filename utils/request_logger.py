@@ -21,6 +21,7 @@ from config import Config
 from settings import DATA_DIR
 import settings
 from utils.http import gen_id
+from utils import conversation_index
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +363,7 @@ def _write_turn(turn: dict[str, Any]) -> None:
 
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(doc, f, ensure_ascii=False, indent=2, default=str)
+            conversation_index.upsert_from_document(doc, filepath)
         except OSError as e:
             logger.warning('写入对话日志失败: %s', e)
         except json.JSONDecodeError as e:

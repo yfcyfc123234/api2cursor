@@ -25,6 +25,7 @@ from settings import DATA_DIR
 from utils.http import sse_response
 from routes.common import sse_data_message
 from utils import request_logger as request_logger_mod
+from utils import conversation_index as conv_idx
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +219,33 @@ def get_stats():
     if err:
         return err
     from utils.usage_tracker import usage_tracker
-    return jsonify(usage_tracker.get_stats())
+    from utils.model_pricing import enrich_usage_stats
+
+    return jsonify(enrich_usage_stats(usage_tracker.get_stats()))
+
+
+@bp.route('/api/admin/pricing', methods=['GET'])
+def get_model_pricing():
+    """返回当前定价 JSON 全文（供管理面板查看价格表）。"""
+    err = _check_auth()
+    if err:
+        return err
+    from utils.model_pricing import snapshot_for_admin
+
+    return jsonify(snapshot_for_admin())
+
+
+@bp.route('/api/admin/pricing/reload', methods=['POST'])
+def reload_model_pricing():
+    """清除定价文件缓存，下次读取时重新加载磁盘文件。"""
+    err = _check_auth()
+    if err:
+        return err
+    from utils.model_pricing import invalidate_cache, load_document
+
+    invalidate_cache()
+    _, meta = load_document()
+    return jsonify({'ok': True, 'meta': meta})
 
 
 # ─── 配置导入 / 导出 ──────────────────────────────────
@@ -345,6 +372,9 @@ def _check_auth_with_query_key() -> Any | None:
 
 
 def _find_conversation_file(conversation_id: str, date: str | None = None) -> str | None:
+    ap = conv_idx.resolve_abs_path(conversation_id, date)
+    if ap:
+        return ap
     if not os.path.isdir(_LOG_DIR):
         return None
     if date:
@@ -366,6 +396,37 @@ def _list_conversation_files() -> list[str]:
     files = glob.glob(pattern)
     files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
     return files
+
+
+def _paths_for_export_all() -> list[str]:
+    """优先用索引得到路径；索引空而磁盘有文件时重建一次；仍不可用则回退 glob。"""
+    rels = conv_idx.list_all_rel_paths()
+    if rels is None:
+        return _list_conversation_files()
+
+    def collect(rlist: list[str]) -> list[str]:
+        out: list[str] = []
+        for rel in rlist:
+            ap = conv_idx.abs_path_from_rel(rel)
+            if os.path.isfile(ap):
+                out.append(ap)
+        return out
+
+    paths = collect(rels)
+    if not paths and os.path.isdir(_LOG_DIR):
+        pattern = os.path.join(_LOG_DIR, '*', '*.json')
+        if glob.glob(pattern):
+            conv_idx.rebuild_from_disk()
+            paths = collect(conv_idx.list_all_rel_paths() or [])
+    if not paths:
+        return _list_conversation_files()
+    return paths
+
+
+def _dt_to_index_iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def _parse_iso_dt(s: str) -> datetime | None:
@@ -411,6 +472,43 @@ def _conversation_doc_in_time_range(doc: dict[str, Any], start: datetime | None,
     return any(_dt_in_range(t, start, end) for t in times)
 
 
+def _conversation_has_recorded_error(doc: dict[str, Any]) -> bool:
+    """会话内是否至少有一条 turn 带有 error（代理写入的上游/转发错误等）。"""
+    for turn in doc.get('turns') or []:
+        if not isinstance(turn, dict):
+            continue
+        err = turn.get('error')
+        if err is None:
+            continue
+        if isinstance(err, dict) and not err:
+            continue
+        if isinstance(err, str) and not err.strip():
+            continue
+        return True
+    return False
+
+
+def _pick_last_suspect_export_files() -> tuple[list[str], str]:
+    """按文件修改时间从新到旧扫描，优先选「含 turn.error」的最近一条；否则取最新一条。
+
+    返回 (paths, reason_code)。
+    """
+    files = _list_conversation_files()
+    if not files:
+        return [], 'no_files'
+
+    for fp in files:
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                doc = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(doc, dict) and _conversation_has_recorded_error(doc):
+            return [fp], 'has_turn_error'
+
+    return [files[0]], 'newest_fallback'
+
+
 def _logs_export_readme() -> str:
     return (
         'api2cursor 日志导出包说明\n'
@@ -424,7 +522,10 @@ def _logs_export_readme() -> str:
         '  log_notes.json — 管理面板为会话添加的备注。\n\n'
         'manifest.json — 导出元数据（时间、筛选条件、文件数量等）。\n\n'
         '关于「流式是否截断」：若环境变量 VERBOSE_FULL_STREAM=1，则 verbose 模式下写入磁盘的\n'
-        'stream_trace 事件为完整列表；否则可能仅保留头尾若干条（中间折叠计数），详见 request_logger。\n'
+        'stream_trace 事件为完整列表；否则可能仅保留头尾若干条（中间折叠计数），详见 request_logger。\n\n'
+        '导出模式「最近可疑会话」：manifest.export_mode=last_suspect 时仅含 1 个会话文件；\n'
+        '优先选最近修改且含 turn.error 的会话；若无则取最新一条（last_suspect_pick_reason=newest_fallback）。\n'
+        'has_turn_error = 命中含错误的 turn；newest_fallback = 历史里暂无 error 字段时仍导出最新会话。\n'
     )
 
 
@@ -437,31 +538,70 @@ def logs_export_zip():
 
     data = request.get_json(force=True, silent=True) or {}
     export_all = bool(data.get('all', False))
+    last_suspect = bool(data.get('last_suspect') or data.get('lastSuspect'))
     start_s = (data.get('start') or '').strip()
     end_s = (data.get('end') or '').strip()
 
     start_dt = _parse_iso_dt(start_s) if start_s else None
     end_dt = _parse_iso_dt(end_s) if end_s else None
 
-    if not export_all:
+    if last_suspect:
+        if export_all or start_s or end_s:
+            return jsonify(
+                {
+                    'error': {
+                        'message': 'last_suspect 与 all / 时间范围互斥，请勿同时传',
+                        'type': 'bad_request',
+                    }
+                }
+            ), 400
+        included = []
+        suspect_reason = ''
+        rel, idx_reason = conv_idx.pick_last_suspect_rel_path()
+        if rel and idx_reason in ('has_turn_error', 'newest_fallback'):
+            ap = conv_idx.abs_path_from_rel(rel)
+            if os.path.isfile(ap):
+                included = [ap]
+                suspect_reason = idx_reason
+        if not included:
+            included, suspect_reason = _pick_last_suspect_export_files()
+        if not included:
+            return jsonify(
+                {
+                    'error': {
+                        'message': '没有可导出的会话日志（data/conversations 下无 json）',
+                        'type': 'bad_request',
+                    }
+                }
+            ), 400
+    elif not export_all:
         if start_dt is None or end_dt is None:
             return jsonify({'error': {'message': '请设置 all=true，或同时提供 start 与 end（ISO8601）', 'type': 'bad_request'}}), 400
         if start_dt > end_dt:
             return jsonify({'error': {'message': 'start 不能晚于 end', 'type': 'bad_request'}}), 400
 
-    files = _list_conversation_files()
-    included: list[str] = []
-    for fp in files:
-        if export_all:
-            included.append(fp)
-            continue
-        try:
-            with open(fp, 'r', encoding='utf-8') as f:
-                doc = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(doc, dict) and _conversation_doc_in_time_range(doc, start_dt, end_dt):
-            included.append(fp)
+        start_iso = _dt_to_index_iso(start_dt)
+        end_iso = _dt_to_index_iso(end_dt)
+        rels = conv_idx.list_rel_paths_time_range_overlap(start_iso, end_iso)
+        included = []
+        if rels is not None:
+            for rel in rels:
+                ap = conv_idx.abs_path_from_rel(rel)
+                if os.path.isfile(ap):
+                    included.append(ap)
+        else:
+            for fp in _list_conversation_files():
+                try:
+                    with open(fp, 'r', encoding='utf-8') as f:
+                        doc = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(doc, dict) and _conversation_doc_in_time_range(doc, start_dt, end_dt):
+                    included.append(fp)
+        suspect_reason = ''
+    else:
+        included = _paths_for_export_all()
+        suspect_reason = ''
 
     buf = io.BytesIO()
     exported_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -471,7 +611,9 @@ def logs_export_zip():
             'version': 1,
             'exported_at': exported_at,
             'export_all': export_all,
-            'time_range': None if export_all else {'start': start_s, 'end': end_s},
+            'export_mode': 'last_suspect' if last_suspect else ('all' if export_all else 'time_range'),
+            'last_suspect_pick_reason': suspect_reason if last_suspect else None,
+            'time_range': None if export_all or last_suspect else {'start': start_s, 'end': end_s},
             'session_file_count': len(included),
             'verbose_full_stream_env': os.getenv('VERBOSE_FULL_STREAM', ''),
         }
@@ -500,7 +642,8 @@ def logs_export_zip():
                 zf.writestr(arcname, f.read())
 
     buf.seek(0)
-    fname = f'api2cursor-logs-{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}.zip'
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+    fname = f'api2cursor-logs-last-suspect-{ts}.zip' if last_suspect else f'api2cursor-logs-{ts}.zip'
     return send_file(
         buf,
         mimetype='application/zip',
@@ -541,6 +684,9 @@ def logs_count():
     if err:
         return err
 
+    n_idx = conv_idx.count_rows()
+    if n_idx is not None:
+        return jsonify({'count': n_idx})
     n = 0
     if os.path.isdir(_LOG_DIR):
         n = len(glob.glob(os.path.join(_LOG_DIR, '*', '*.json')))
@@ -559,6 +705,24 @@ def logs_list():
     date = (request.args.get('date') or '').strip() or None
 
     notes = _load_log_notes()
+
+    idx_rows = conv_idx.list_admin_rows(limit=limit, q=q, date=date)
+    if idx_rows is not None:
+        items: list[dict[str, Any]] = []
+        for row in idx_rows:
+            cid = row['conversation_id']
+            items.append({
+                'conversation_id': cid,
+                'date': row['date'],
+                'route': row['route'],
+                'last_client_model': row['last_client_model'],
+                'last_backend': row['last_backend'],
+                'created_at': row['created_at'],
+                'updated_at': row['updated_at'],
+                'turn_count': row['turn_count'],
+                'note': (notes.get(cid) or {}).get('note', ''),
+            })
+        return jsonify({'items': items})
 
     files = _list_conversation_files()
     if date:
@@ -650,6 +814,8 @@ def logs_delete(conversation_id: str):
     except OSError as e:
         return jsonify({'error': {'message': f'delete failed: {e}', 'type': 'delete_error'}}), 500
 
+    conv_idx.delete_conversation(conversation_id)
+
     notes = _load_log_notes()
     if conversation_id in notes:
         notes.pop(conversation_id, None)
@@ -679,6 +845,7 @@ def logs_clear():
                     {'phase': 'done', 'removed': 0, 'errors': 0, 'total': 0},
                     ensure_ascii=False,
                 ) + '\n'
+                conv_idx.clear_all_rows()
                 return
 
             files = glob.glob(os.path.join(_LOG_DIR, '*', '*.json'))
@@ -719,6 +886,7 @@ def logs_clear():
                 },
                 ensure_ascii=False,
             ) + '\n'
+            conv_idx.clear_all_rows()
         except Exception as e:
             logger.exception('清空历史日志异常')
             yield json.dumps({'phase': 'error', 'message': str(e)}, ensure_ascii=False) + '\n'

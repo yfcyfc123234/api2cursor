@@ -14,6 +14,7 @@ from flask_cors import CORS
 import settings
 from config import Config
 from routes import register_routes
+from utils import conversation_index as conversation_index_mod
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ def create_app():
     app = Flask(__name__)
     CORS(app)
     settings.load()
+    conversation_index_mod.initialize()
 
     # ─── JSON 错误处理器 ──────────────────────────
 

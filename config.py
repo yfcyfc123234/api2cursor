@@ -34,3 +34,11 @@ class Config:
 
     DEBUG = DEBUG_MODE in ('simple', 'verbose')
     VERBOSE_FILE_LOG = DEBUG_MODE == 'verbose'
+
+    # 会话日志 SQLite 索引（仅元数据，正文仍在 data/conversations）
+    CONVERSATION_INDEX_PATH = os.getenv('CONVERSATION_INDEX_PATH', '').strip()
+    _conv_idx_dis = os.getenv('CONVERSATION_INDEX_DISABLED', '').strip().lower()
+    CONVERSATION_INDEX_DISABLED = _conv_idx_dis in ('1', 'true', 'yes', 'on')
+
+    # 模型定价 JSON（用量费用估算），空则使用项目根目录 model_pricing.json
+    MODEL_PRICING_PATH = os.getenv('MODEL_PRICING_PATH', '').strip()

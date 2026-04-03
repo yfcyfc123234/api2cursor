@@ -102,6 +102,12 @@ async function loadDashboard() {
   }
 }
 
+function formatMoney(n, sym) {
+  if (n == null || n === '' || Number.isNaN(Number(n))) return '—';
+  const prefix = sym ? String(sym) : '';
+  return prefix + Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+}
+
 async function loadStats() {
   const el = document.getElementById('statsContent');
   if (!el) return;
@@ -116,18 +122,147 @@ async function loadStats() {
     const uptime = data.uptime_seconds || 0;
     const h = Math.floor(uptime / 3600);
     const m = Math.floor((uptime % 3600) / 60);
-    let html = '<div class="hint" style="margin-bottom:12px">运行时长: ' + h + '小时' + m + '分钟</div>';
-    html += '<table class="stats-table"><thead><tr><th>模型</th><th>请求数</th><th>输入 Tokens</th><th>输出 Tokens</th><th>总 Tokens</th></tr></thead><tbody>';
+    const pr = data.pricing || {};
+    const sym = pr.currency_symbol || '';
+    let hintLine = '运行时长: ' + h + '小时' + m + '分钟';
+    if (data.estimated_total_cost != null) {
+      hintLine += ' · 合计预估: ' + formatMoney(data.estimated_total_cost, sym) + '（' + esc(pr.currency || '—') + '）';
+    } else {
+      hintLine += ' · 合计预估: —（请配置仓库根目录 model_pricing.json 或 MODEL_PRICING_PATH）';
+    }
+    const sub = '仅供参考，以云厂商账单为准。' + (pr.file_error ? ' 定价文件: ' + esc(pr.file_error) : '');
+    let html = '<div class="hint" style="margin-bottom:12px">' + hintLine + '<div class="pricing-sub">' + sub + '</div></div>';
+    html += '<table class="stats-table"><thead><tr><th>模型</th><th>请求数</th><th>输入 Tokens</th><th>输出 Tokens</th><th>总 Tokens</th><th>预估费用</th><th>定价匹配</th><th>定价页</th></tr></thead><tbody>';
     keys.sort((a, b) => models[b].request_count - models[a].request_count);
     for (const name of keys) {
       const s = models[name];
-      html += '<tr><td>' + esc(name) + '</td><td>' + s.request_count + '</td><td>' + s.input_tokens.toLocaleString() + '</td><td>' + s.output_tokens.toLocaleString() + '</td><td>' + s.total_tokens.toLocaleString() + '</td></tr>';
+      const cost = s.priced ? formatMoney(s.estimated_cost, sym) : '—';
+      let matchCell = '<span style="color:var(--muted)">未配置</span>';
+      if (s.pricing_match === 'exact') matchCell = '表内同名';
+      else if (s.pricing_match === 'alias') matchCell = '别名 → ' + esc(s.pricing_model_key || '');
+      else if (s.priced) matchCell = '已计价';
+      const src = (s.pricing_source_url || '').trim();
+      const linkCell = src
+        ? '<a class="pricing-src-link" href="' + esc(src) + '" target="_blank" rel="noopener noreferrer">打开</a>'
+        : '<span style="color:var(--muted)">—</span>';
+      html += '<tr><td>' + esc(name) + '</td><td>' + s.request_count + '</td><td>' + s.input_tokens.toLocaleString() + '</td><td>' + s.output_tokens.toLocaleString() + '</td><td>' + s.total_tokens.toLocaleString() + '</td><td>' + cost + '</td><td>' + matchCell + '</td><td>' + linkCell + '</td></tr>';
     }
     html += '</tbody></table>';
     el.innerHTML = html;
   } catch (e) {
     el.innerHTML = '<div class="empty">加载统计失败</div>';
   }
+}
+
+async function reloadPricingFromDisk() {
+  try {
+    await api('/api/admin/pricing/reload', { method: 'POST', body: '{}' });
+    toast('已重新加载定价文件');
+    await loadStats();
+    const modal = document.getElementById('pricingModal');
+    if (modal && modal.classList.contains('active')) await openPricingModal();
+  } catch (e) {
+    toast(e.message || '重载失败', false);
+  }
+}
+
+function pricingSrcButton(url) {
+  const u = (url || '').trim();
+  if (!u) return '<span style="color:var(--muted)">—</span>';
+  return '<a class="btn btn-ghost btn-sm pricing-src-btn" href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">查看定价页</a>';
+}
+
+async function openPricingModal() {
+  const overlay = document.getElementById('pricingModal');
+  const metaEl = document.getElementById('pricingMeta');
+  const wrap = document.getElementById('pricingTableWrap');
+  if (!overlay || !metaEl || !wrap) return;
+  overlay.classList.add('active');
+  wrap.innerHTML = '<div class="empty">加载中…</div>';
+  metaEl.innerHTML = '';
+  try {
+    const data = await api('/api/admin/pricing');
+    const doc = data.document || {};
+    const meta = data.meta || {};
+    const aliases = doc.aliases && typeof doc.aliases === 'object' ? doc.aliases : {};
+    const providers = Array.isArray(doc.providers) ? doc.providers : [];
+    let metaParts = [];
+    if (meta.error) metaParts.push('加载问题: ' + esc(String(meta.error)));
+    if (doc.updated_at) metaParts.push('本文件更新日期: ' + esc(String(doc.updated_at)));
+    if (doc.currency) metaParts.push('币种: ' + esc(String(doc.currency)) + (doc.currency_symbol ? ' (' + esc(String(doc.currency_symbol)) + ')' : ''));
+    if (doc.note) metaParts.push(esc(String(doc.note)));
+    metaParts.push('<div class="pricing-sub">文件: ' + esc(String(meta.path || '')) + '</div>');
+    metaParts.push('<div class="pricing-sub">各模型依据的网页在下方表格「查看定价页」；不同厂商/系列可填不同 source_url。</div>');
+    metaEl.innerHTML = metaParts.join('<br>');
+
+    let body = '';
+    if (providers.length) {
+      body += '<div class="pricing-tree">';
+      for (const p of providers) {
+        if (!p || typeof p !== 'object') continue;
+        const pName = esc(String(p.name || p.id || '未命名厂商'));
+        body += '<details class="pricing-tier" open><summary class="pricing-tier-summary">' + pName + '</summary>';
+        const seriesList = Array.isArray(p.series) ? p.series : [];
+        for (const ser of seriesList) {
+          if (!ser || typeof ser !== 'object') continue;
+          const sName = esc(String(ser.name || ser.id || '未命名系列'));
+          body += '<details class="pricing-tier pricing-tier-2"><summary class="pricing-tier-summary">' + sName + '</summary>';
+          body += '<div class="pricing-tier-body"><table class="stats-table"><thead><tr><th>模型 id</th><th>名称</th><th>输入 / 1M</th><th>输出 / 1M</th><th>价格来源</th></tr></thead><tbody>';
+          const mlist = Array.isArray(ser.models) ? ser.models : [];
+          for (const m of mlist) {
+            if (!m || typeof m !== 'object') continue;
+            const mid = esc(String(m.id || ''));
+            const mlabel = esc(String(m.name || m.id || ''));
+            const pi = m.input_per_million;
+            const po = m.output_per_million;
+            const piS = pi != null && pi !== '' ? esc(String(pi)) : '—';
+            const poS = po != null && po !== '' ? esc(String(po)) : '—';
+            body += '<tr><td><code>' + mid + '</code></td><td>' + mlabel + '</td><td>' + piS + '</td><td>' + poS + '</td><td>' + pricingSrcButton(m.source_url) + '</td></tr>';
+          }
+          body += '</tbody></table></div></details>';
+        }
+        body += '</details>';
+      }
+      body += '</div>';
+    } else {
+      const models = doc.models && typeof doc.models === 'object' ? doc.models : {};
+      const keys = Object.keys(models).sort();
+      if (!keys.length) {
+        wrap.innerHTML = '<div class="empty">未配置 providers 或 models，请编辑 model_pricing.json（见 doc/model-pricing.md）</div>';
+        metaEl.innerHTML = metaParts.join('<br>');
+        return;
+      }
+      body += '<div class="hint" style="margin-bottom:10px">当前为扁平 models 结构（旧版）。</div>';
+      body += '<div style="overflow:auto;max-height:55vh"><table class="stats-table"><thead><tr><th>模型</th><th>输入 / 1M</th><th>输出 / 1M</th><th>价格来源</th></tr></thead><tbody>';
+      for (const k of keys) {
+        const row = models[k] || {};
+        const pi = row.input_per_million;
+        const po = row.output_per_million;
+        body += '<tr><td>' + esc(k) + '</td><td>' + (pi != null && pi !== '' ? esc(String(pi)) : '—') + '</td><td>' + (po != null && po !== '' ? esc(String(po)) : '—') + '</td><td>' + pricingSrcButton(row.source_url) + '</td></tr>';
+      }
+      body += '</tbody></table></div>';
+    }
+
+    const ak = Object.keys(aliases);
+    if (ak.length) {
+      body += '<div class="hint" style="margin-top:16px;margin-bottom:8px">aliases（Cursor 模型名 → 模型 id）</div>';
+      body += '<div style="overflow:auto;max-height:30vh"><table class="stats-table"><thead><tr><th>Cursor 模型名</th><th>指向 id</th></tr></thead><tbody>';
+      ak.sort().forEach((a) => {
+        body += '<tr><td>' + esc(a) + '</td><td><code>' + esc(String(aliases[a])) + '</code></td></tr>';
+      });
+      body += '</tbody></table></div>';
+    }
+
+    wrap.innerHTML = body;
+  } catch (e) {
+    wrap.innerHTML = '<div class="empty">加载失败</div>';
+    toast(e.message || '加载定价失败', false);
+  }
+}
+
+function closePricingModal() {
+  const overlay = document.getElementById('pricingModal');
+  if (overlay) overlay.classList.remove('active');
 }
 
 async function checkHealth() {
@@ -465,6 +600,21 @@ async function exportLogsZipRange() {
   if (!confirm('将按时间范围导出会话日志，是否继续？')) return;
   try {
     await downloadLogsZip({ all: false, start, end });
+  } catch (e) {
+    toast('导出失败: ' + e.message, false);
+  }
+}
+
+async function exportLogsZipLastSuspect() {
+  if (
+    !confirm(
+      '将只导出「最近可疑」1 个会话：优先选已记录 turn.error 的最近会话；否则为磁盘上最新一条。是否继续？'
+    )
+  ) {
+    return;
+  }
+  try {
+    await downloadLogsZip({ last_suspect: true });
   } catch (e) {
     toast('导出失败: ' + e.message, false);
   }

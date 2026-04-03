@@ -13,6 +13,7 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 
 COPY *.py ./
+COPY model_pricing.json ./
 COPY routes/ routes/
 COPY adapters/ adapters/
 COPY utils/ utils/

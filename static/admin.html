@@ -87,7 +87,11 @@
     <div class="card">
       <div class="card-header">
         <h2>用量统计</h2>
-        <button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button>
+        <div class="card-header-actions">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="openPricingModal()">模型价格表</button>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="reloadPricingFromDisk()">重新加载定价</button>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button>
+        </div>
       </div>
       <div id="statsContent"><div class="empty">加载中…</div></div>
     </div>
@@ -202,6 +206,19 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal()">取消</button>
       <button class="btn btn-primary" id="modalSaveBtn" onclick="saveMapping()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 定价表弹窗 -->
+<div class="modal-overlay" id="pricingModal" onclick="if(event.target===this)closePricingModal()">
+  <div class="modal modal-wide" onclick="event.stopPropagation()">
+    <h3>模型价格表</h3>
+    <div id="pricingMeta" class="hint" style="margin-bottom:12px"></div>
+    <div id="pricingTableWrap"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-ghost" onclick="reloadPricingFromDisk()">重新加载定价</button>
+      <button type="button" class="btn btn-primary" onclick="closePricingModal()">关闭</button>
     </div>
   </div>
 </div>

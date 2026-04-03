@@ -50,6 +50,10 @@
       </div>
       <div class="log-toolbar" style="margin-top:12px">
         <button class="btn btn-primary btn-sm" onclick="exportLogsZipAll()">导出全部 ZIP</button>
+        <button class="btn btn-primary btn-sm" onclick="exportLogsZipLastSuspect()" title="优先含 turn.error 的最近会话，否则仅最新一条">导出最近可疑会话 ZIP</button>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        「最近可疑会话」用于 Cursor 突然停住时快速打包排查：优先选<strong>最近修改且日志里已有 error</strong>的那条对话；若还没有写入 error，则退化为<strong>磁盘上最新一条</strong>会话。ZIP 内 <code>manifest.json</code> 的 <code>last_suspect_pick_reason</code> 会标明是 <code>has_turn_error</code> 还是 <code>newest_fallback</code>。
       </div>
       <div class="field" style="margin-top:12px">
         <label>开始时间（本地，精确到秒）</label>
