@@ -800,6 +800,18 @@ function applyClearProgressPayload(msg) {
 }
 
 async function clearLogs() {
+  try {
+    const cnt = await api('/api/admin/logs/count');
+    const n = typeof cnt.count === 'number' ? cnt.count : 0;
+    if (n <= 0) {
+      toast('当前没有历史日志，无需清空。');
+      return;
+    }
+  } catch (e) {
+    toast('无法检查历史日志: ' + e.message, false);
+    return;
+  }
+
   if (!confirm('确定要清空历史日志吗？这会删除服务器上的 conversations json 文件。')) return;
 
   const hasModal = !!document.getElementById('clearProgressModal');

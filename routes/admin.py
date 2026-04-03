@@ -534,6 +534,19 @@ def logs_live_sse():
     return sse_response(gen())
 
 
+@bp.route('/api/admin/logs/count', methods=['GET'])
+def logs_count():
+    """返回与「清空历史」相同规则下的会话 JSON 文件数量，供前端判断是否可清空。"""
+    err = _check_auth()
+    if err:
+        return err
+
+    n = 0
+    if os.path.isdir(_LOG_DIR):
+        n = len(glob.glob(os.path.join(_LOG_DIR, '*', '*.json')))
+    return jsonify({'count': n})
+
+
 @bp.route('/api/admin/logs', methods=['GET'])
 def logs_list():
     """列出最近的会话日志（历史）。"""
