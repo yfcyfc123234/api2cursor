@@ -400,22 +400,69 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 "SELECT * FROM upstream_requests WHERE turn_id = ?", (turn_row['id'],)
             ).fetchone()
 
-            # 流式事件
-            stream_events_upstream = []
-            stream_events_client = []
+            # 流式事件 → 服务端折叠为文本（不再返回原始事件数组，大幅减小响应体积）
+            event_count = 0
+            folded_reasoning = ''
+            folded_content = ''
+            folded_tool_calls = []
             for row in conn.execute(
                 "SELECT * FROM stream_events WHERE turn_id = ? ORDER BY kind, seq",
                 (turn_row['id'],),
             ):
+                if row['kind'] != 'client':
+                    continue  # 只折叠 client 事件（面向 Cursor 的输出）
                 evt = _parse_json(row['data'])
-                if evt is None:
-                    evt = row['data']
-                if row['kind'] == 'upstream':
-                    stream_events_upstream.append(evt)
-                else:
-                    stream_events_client.append(evt)
+                if evt is None or not isinstance(evt, dict):
+                    continue
+                chunk = evt.get('data')
+                if chunk is None or not isinstance(chunk, dict):
+                    continue
+                choices = chunk.get('choices') or []
+                if not choices:
+                    continue
+                delta = choices[0].get('delta') or {}
+                if delta.get('reasoning_content'):
+                    folded_reasoning += str(delta['reasoning_content'])
+                if delta.get('content'):
+                    folded_content += str(delta['content'])
+                for tc in delta.get('tool_calls') or []:
+                    folded_tool_calls.append(tc)
+                event_count += 1
 
             # 组装返回
+            result_turn = {
+                'turn_id': turn_row['id'],
+                'route': turn['route'],
+                'client_model': turn['client_model'],
+                'backend': turn['backend'],
+                'upstream_model': turn['upstream_model'],
+                'target_url': turn['target_url'],
+                'stream': bool(turn['stream']),
+                'started_at': turn['started_at'],
+                'updated_at': turn['updated_at'],
+                'duration_ms': turn['duration_ms'],
+                'usage': {
+                    'prompt_tokens': turn['prompt_tokens'],
+                    'completion_tokens': turn['completion_tokens'],
+                    'total_tokens': turn['total_tokens'],
+                },
+                'error': {'stage': turn['error_stage'], 'message': turn['error_message']}
+                          if turn['error_stage'] or turn['error_message'] else None,
+                'client_request': {'messages': messages},
+                'upstream_request': {'headers': _parse_json(ur['headers']) if ur else None,
+                                     'body': _parse_json(ur['body']) if ur else None},
+                'stream_trace': {
+                    'summary': _parse_json(turn['stream_summary']) or {},
+                    'event_count': event_count,
+                    'folded': {
+                        'reasoning': folded_reasoning,
+                        'content': folded_content,
+                        'tool_calls': folded_tool_calls,
+                    },
+                },
+                'client_response': _parse_json(turn['client_response']),
+                'upstream_response': _parse_json(turn['upstream_response']),
+            }
             return {
                 'conversation_id': conv_id,
                 'route': conv['route'],
@@ -425,35 +472,7 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 'last_backend': conv['last_backend'],
                 '_current_turn': turn.get('turn_index', 0),
                 '_total_turns': total_turns,
-                'turns': [{
-                    'turn_id': turn_row['id'],
-                    'route': turn['route'],
-                    'client_model': turn['client_model'],
-                    'backend': turn['backend'],
-                    'upstream_model': turn['upstream_model'],
-                    'target_url': turn['target_url'],
-                    'stream': bool(turn['stream']),
-                    'started_at': turn['started_at'],
-                    'updated_at': turn['updated_at'],
-                    'duration_ms': turn['duration_ms'],
-                    'usage': {
-                        'prompt_tokens': turn['prompt_tokens'],
-                        'completion_tokens': turn['completion_tokens'],
-                        'total_tokens': turn['total_tokens'],
-                    },
-                    'error': {'stage': turn['error_stage'], 'message': turn['error_message']}
-                              if turn['error_stage'] or turn['error_message'] else None,
-                    'client_request': {'messages': messages},
-                    'upstream_request': {'headers': _parse_json(ur['headers']) if ur else None,
-                                         'body': _parse_json(ur['body']) if ur else None},
-                    'stream_trace': {
-                        'upstream_events': stream_events_upstream,
-                        'client_events': stream_events_client,
-                        'summary': _parse_json(turn['stream_summary']) or {},
-                    },
-                    'client_response': _parse_json(turn['client_response']),
-                    'upstream_response': _parse_json(turn['upstream_response']),
-                }],
+                'turns': [result_turn],
             }
         finally:
             conn.close()
