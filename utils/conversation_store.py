@@ -400,17 +400,20 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 "SELECT * FROM upstream_requests WHERE turn_id = ?", (turn_row['id'],)
             ).fetchone()
 
-            # 流式事件 → 服务端折叠为文本（不再返回原始事件数组，大幅减小响应体积）
+            # 流式事件 → 服务端折叠为文本
+            # 注意: tool_calls 在流式中被拆成多个片段（name+空args、然后逐字符传 args），
+            # 需按 index 合并；只有当出现新 id 时才确认前一个 tool_call 完成。
             event_count = 0
             folded_reasoning = ''
             folded_content = ''
+            tc_by_index: dict[int, dict[str, Any]] = {}
             folded_tool_calls = []
             for row in conn.execute(
                 "SELECT * FROM stream_events WHERE turn_id = ? ORDER BY kind, seq",
                 (turn_row['id'],),
             ):
                 if row['kind'] != 'client':
-                    continue  # 只折叠 client 事件（面向 Cursor 的输出）
+                    continue
                 evt = _parse_json(row['data'])
                 if evt is None or not isinstance(evt, dict):
                     continue
@@ -425,9 +428,28 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                     folded_reasoning += str(delta['reasoning_content'])
                 if delta.get('content'):
                     folded_content += str(delta['content'])
+                # 合并 tool_calls 碎片
                 for tc in delta.get('tool_calls') or []:
-                    folded_tool_calls.append(tc)
+                    tc_idx = tc.get('index', 0)
+                    if tc_idx not in tc_by_index:
+                        tc_by_index[tc_idx] = {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}}
+                    cur = tc_by_index[tc_idx]
+                    # id: 只在第一个片段出现
+                    if tc.get('id'):
+                        cur['id'] = tc['id']
+                    # function.name: 只在第一个片段出现
+                    fn = tc.get('function') or {}
+                    if fn.get('name'):
+                        cur['function']['name'] = fn['name']
+                    # function.arguments: 逐片段追加
+                    if fn.get('arguments'):
+                        cur['function']['arguments'] += fn['arguments']
                 event_count += 1
+            # 把合并后的 tool_calls 按 index 排序列入
+            for idx in sorted(tc_by_index.keys()):
+                tc = tc_by_index[idx]
+                if tc['id']:  # 有 id 的才是有效调用
+                    folded_tool_calls.append(tc)
 
             # 组装返回
             result_turn = {
