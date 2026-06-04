@@ -594,6 +594,13 @@ function renderErrorBubble(error) {
 
 function renderMarkdown(text) {
   if (!text) return '';
+  // Cursor 消息中包含大量 XML 标签（<user_info>, <agent_skill> 等），
+  // marked.js 会将其当作 HTML 吃掉内容。检测到 XML 标签时直接用纯文本渲染。
+  var hasXmlTags = /<[a-zA-Z_][a-zA-Z0-9_.-]*(\s[^>]*)?>/.test(text);
+  if (hasXmlTags) {
+    return '<pre style="white-space:pre-wrap;margin:0;font-family:Consolas,Monaco,monospace;font-size:12px;max-height:400px;overflow-y:auto">' +
+      escHtml(text) + '</pre>';
+  }
   if (typeof marked !== 'undefined') {
     try {
       var rendered = marked.parse(text);
@@ -602,7 +609,6 @@ function renderMarkdown(text) {
       // fall through
     }
   }
-  // Fallback: basic HTML escape + newlines
   return '<pre style="white-space:pre-wrap;margin:0;font-family:inherit">' +
     escHtml(text) + '</pre>';
 }
