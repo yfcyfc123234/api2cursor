@@ -18,6 +18,7 @@ COPY routes/ routes/
 COPY adapters/ adapters/
 COPY utils/ utils/
 COPY static/ static/
+COPY scripts/ scripts/
 
 RUN mkdir -p data
 

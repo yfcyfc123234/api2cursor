@@ -18,7 +18,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import conversation_store
 
-_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'conversations')
+# 数据目录：支持命令行参数、环境变量、自动探测
+_BASE = os.environ.get('DATA_DIR', '')
+if not _BASE:
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data'),
+        '/app/data',
+        '/www/wwwroot/api2cursor/data',
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            _BASE = c
+            break
+_LOG_DIR = os.path.join(_BASE, 'conversations')
 
 
 def main():
