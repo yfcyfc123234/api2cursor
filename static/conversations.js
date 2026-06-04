@@ -177,15 +177,14 @@ function renderConversationList() {
       escAttr(c.conversation_id) + '\',\'' + escAttr(c.date) + '\')">';
     html += '<div class="conv-item-top">';
     html += '<span class="conv-id">' + escHtml(c.conversation_id) + '</span>';
-    // 检查 turns 是否有 error — 通过后端传来的数据无法直接判断，
-    // 这里根据 last_client_model 为空且 route 存在来推断可能有问题
+    if (c.has_error) html += '<span class="conv-badge conv-badge-error">错误</span>';
     html += '</div>';
     html += '<div class="conv-item-meta">';
     html += '<span>' + escHtml(c.last_client_model || 'unknown') + '</span>';
     html += '<span>via ' + escHtml(c.last_backend || '?') + '</span>';
     html += '<span>' + c.turn_count + ' 轮</span>';
-    if (c.date) html += '<span>' + escHtml(c.date) + '</span>';
     html += '</div>';
+    html += '<div class="conv-item-time">' + formatTime(c.updated_at) + '</div>';
     html += '</div>';
   });
   listEl.innerHTML = html;
@@ -200,6 +199,14 @@ function escHtml(s) {
 function escAttr(s) {
   if (!s) return '';
   return String(s).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+function formatTime(iso) {
+  if (!iso) return '';
+  // 2026-06-04T08:33:23.841101Z → 06-04 08:33:23.841
+  var m = iso.match(/^[\d-]+T(\d{2}):(\d{2}):(\d{2})\.(\d{3})/);
+  if (m) return iso.substring(5, 10) + ' ' + m[1] + ':' + m[2] + ':' + m[3] + '.' + m[4];
+  return iso.substring(0, 19).replace('T', ' ');
 }
 
 /* ===== 打开会话 ===== */

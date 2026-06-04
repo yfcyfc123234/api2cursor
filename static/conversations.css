@@ -146,6 +146,13 @@
   text-overflow: ellipsis;
 }
 
+.conv-item-time {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: Consolas, Monaco, monospace;
+  margin-top: 2px;
+}
+
 /* ===== 右侧：回放区域 ===== */
 .conv-viewer {
   flex: 1;
