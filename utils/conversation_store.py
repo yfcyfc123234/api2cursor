@@ -449,8 +449,7 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 'error': {'stage': turn['error_stage'], 'message': turn['error_message']}
                           if turn['error_stage'] or turn['error_message'] else None,
                 'client_request': {'messages': messages},
-                'upstream_request': {'headers': _parse_json(ur['headers']) if ur else None,
-                                     'body': _parse_json(ur['body']) if ur else None},
+                'upstream_request': None,  # 按需加载（对比视图时再取）
                 'stream_trace': {
                     'summary': _parse_json(turn['stream_summary']) or {},
                     'event_count': event_count,
