@@ -30,6 +30,7 @@ def main():
         app,
         host='0.0.0.0',
         port=Config.PROXY_PORT,
+        threads=16,
         channel_timeout=Config.API_TIMEOUT,
         send_bytes=1,
     )
