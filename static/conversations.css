@@ -230,6 +230,7 @@
 }
 .conv-meta strong { color: var(--text); }
 .conv-meta .meta-err { color: var(--red); }
+.timing-info { color: var(--yellow); }
 
 /* 查看器工具栏 */
 .viewer-toolbar {
@@ -497,17 +498,44 @@
   .conv-main {
     flex-direction: column;
     height: auto;
+    gap: 8px;
   }
   .conv-sidebar {
     width: 100%;
     min-width: auto;
-    max-height: 40vh;
+    max-height: 35vh;
+    border-radius: 8px;
   }
   .conv-viewer {
     margin-left: 0;
-    margin-top: 12px;
     min-height: 60vh;
+    border-radius: 8px;
   }
+  .conv-sort-bar { gap: 2px; padding: 6px 8px; }
+  .sort-btn { padding: 2px 5px; font-size: 10px; }
+  .conv-item { padding: 8px 10px; }
+  .conv-meta { gap: 6px; padding: 6px 10px; font-size: 11px; }
+  .chat-viewport { padding: 8px; }
+  .chat-bubble { font-size: 12px; padding: 8px 10px; max-width: 100%; }
+  .chat-msg { max-width: 95%; }
+}
+
+@media (max-width: 480px) {
+  header { padding: 8px 0; }
+  header h1 { font-size: 14px; }
+  header .inner { gap: 4px; }
+  header .right { gap: 4px; }
+  .btn-sm { padding: 4px 8px; font-size: 11px; }
+  .conv-sidebar { max-height: 30vh; }
+  .conv-item-top { font-size: 11px; }
+  .conv-item-meta { font-size: 10px; gap: 4px; }
+  .conv-item-time { font-size: 9px; }
+  .turn-tab { padding: 4px 8px; font-size: 10px; }
+  .conv-meta { gap: 4px; font-size: 10px; flex-wrap: wrap; }
+  .chat-avatar { width: 24px; height: 24px; font-size: 12px; }
+  .chat-msg { max-width: 98%; }
+  .viewer-toolbar { gap: 2px; padding: 4px 6px; }
+  .contrast-panel { max-height: 200px; }
 }
 
 /* 滚动条美化 */

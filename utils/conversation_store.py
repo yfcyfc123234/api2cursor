@@ -26,7 +26,7 @@ from utils.http import gen_id
 logger = logging.getLogger(__name__)
 
 _DB_LOCK = threading.Lock()
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _STORE_PATH = os.path.join(DATA_DIR, 'conversations.db')
 
@@ -80,6 +80,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             client_stream_options TEXT,
             client_tools_json TEXT,
             client_type TEXT NOT NULL DEFAULT '',
+            timing_json TEXT,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id)
         );
 
@@ -148,6 +149,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             pass
         try:
             conn.execute("ALTER TABLE turns ADD COLUMN client_type TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+    if ver < 3:
+        try:
+            conn.execute("ALTER TABLE turns ADD COLUMN timing_json TEXT")
         except sqlite3.OperationalError:
             pass
     if ver < _SCHEMA_VERSION:
@@ -225,8 +231,9 @@ def insert_turn(turn: dict[str, Any]) -> None:
                     upstream_model, target_url, stream, started_at, updated_at,
                     duration_ms, prompt_tokens, completion_tokens, total_tokens,
                     error_stage, error_message, stream_summary, client_response, upstream_response,
-                    client_user, client_stream_options, client_tools_json, client_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    client_user, client_stream_options, client_tools_json, client_type,
+                    timing_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     turn_id, conv_id,
                     _compute_turn_index(conn, conv_id, turn_id),
@@ -240,6 +247,7 @@ def insert_turn(turn: dict[str, Any]) -> None:
                     error_stage, error_message,
                     stream_summary, client_response, upstream_response,
                     client_user, client_stream_opts, client_tools, client_type,
+                    _safe_json(turn.get('_timing')),
                 ),
             )
 
@@ -557,6 +565,7 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 },
                 'client_headers': _parse_json(clr['headers']) if clr else None,
                 'client_type': turn.get('client_type', ''),
+                'timing': _parse_json(turn.get('timing_json')),
                 'upstream_request': None,  # 按需加载（对比视图时再取）
                 'stream_trace': {
                     'summary': _parse_json(turn['stream_summary']) or {},

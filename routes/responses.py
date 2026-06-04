@@ -20,6 +20,7 @@ from adapters.responses_cc_adapter import ResponsesStreamConverter, cc_to_respon
 from config import Config
 from routes.common import (
     forward_with_patches,
+    forward_with_patches,
     RouteContext,
     apply_body_modifications,
     apply_header_modifications,
@@ -146,7 +147,7 @@ def _handle_openai_non_stream(
     """处理 OpenAI 兼容后端的非流式 Responses 返回。"""
     cc_payload['stream'] = False
     attach_upstream_request(turn, cc_payload, headers)
-    resp, err, patches = forward_with_patches(
+    resp, err, patches, timing = forward_with_patches(
         url, headers, cc_payload, upstream_model=ctx.upstream_model, client_type="", stream=False)
     if patches and turn: turn["_patches_applied"] = [p["description"] for p in patches]
     if err:
@@ -184,7 +185,7 @@ def _handle_openai_stream(
         yield from converter.start_events()
 
         attach_upstream_request(turn, cc_payload, headers)
-        resp, err, patches = forward_with_patches(
+        resp, err, patches, timing = forward_with_patches(
             url, headers, cc_payload, upstream_model=ctx.upstream_model, client_type="", stream=True)
         if patches and turn: turn["_patches_applied"] = [p["description"] for p in patches]
         if err:
@@ -271,7 +272,7 @@ def _handle_responses_non_stream(
     """处理原生 Responses 后端的非流式返回。"""
     payload['stream'] = False
     attach_upstream_request(turn, payload, headers)
-    resp, err, patches = forward_with_patches(
+    resp, err, patches, timing = forward_with_patches(
         url, headers, payload, upstream_model=ctx.upstream_model, client_type="", stream=False)
     if patches and turn: turn["_patches_applied"] = [p["description"] for p in patches]
     if err:
@@ -304,7 +305,7 @@ def _handle_responses_stream(
     def generate():
         """透传上游原生 Responses 流，并做轻量模型名改写。"""
         attach_upstream_request(turn, payload, headers)
-        resp, err, patches = forward_with_patches(
+        resp, err, patches, timing = forward_with_patches(
             url, headers, payload, upstream_model=ctx.upstream_model, client_type="", stream=True)
         if patches and turn: turn["_patches_applied"] = [p["description"] for p in patches]
         if err:
@@ -402,7 +403,7 @@ def _handle_gemini_non_stream(
 ):
     """处理 Gemini 后端的非流式 Responses 返回。"""
     attach_upstream_request(turn, payload, headers)
-    resp, err, patches = forward_with_patches(
+    resp, err, patches, timing = forward_with_patches(
         url, headers, payload, upstream_model=ctx.upstream_model, client_type="", stream=False)
     if patches and turn: turn["_patches_applied"] = [p["description"] for p in patches]
     if err:
@@ -439,7 +440,7 @@ def _handle_gemini_stream(
         yield from converter.start_events()
 
         attach_upstream_request(turn, payload, headers)
-        resp, err, patches = forward_with_patches(
+        resp, err, patches, timing = forward_with_patches(
             url, headers, payload, upstream_model=ctx.upstream_model, client_type="", stream=True)
         if patches and turn: turn["_patches_applied"] = [p["description"] for p in patches]
         if err:
@@ -530,7 +531,7 @@ def _handle_anthropic_non_stream(
     """处理 Anthropic 后端的非流式 Responses 返回。"""
     anthropic_payload['stream'] = False
     attach_upstream_request(turn, anthropic_payload, headers)
-    resp, err, patches = forward_with_patches(
+    resp, err, patches, timing = forward_with_patches(
         url, headers, anthropic_payload, upstream_model=ctx.upstream_model, client_type="", stream=False)
     if patches and turn: turn["_patches_applied"] = [p["description"] for p in patches]
     if err:
@@ -572,7 +573,7 @@ def _handle_anthropic_stream(
         yield from converter.start_events()
 
         attach_upstream_request(turn, anthropic_payload, headers)
-        resp, err, patches = forward_with_patches(
+        resp, err, patches, timing = forward_with_patches(
             url, headers, anthropic_payload, upstream_model=ctx.upstream_model, client_type="", stream=True)
         if patches and turn: turn["_patches_applied"] = [p["description"] for p in patches]
         if err:

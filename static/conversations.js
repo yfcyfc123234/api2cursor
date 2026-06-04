@@ -347,6 +347,14 @@ function renderConvMeta(turn) {
   if (turn.error) {
     html += '<span class="meta-err">⚠ 有错误</span>';
   }
+  if (turn.timing) {
+    var t = turn.timing;
+    var parts = [];
+    if (t.upstream_ttfb_ms) parts.push('上游TTFB: <strong>' + t.upstream_ttfb_ms + 'ms</strong>');
+    if (t.upstream_total_ms) parts.push('上游总耗时: <strong>' + t.upstream_total_ms + 'ms</strong>');
+    if (t.attempts && t.attempts > 1) parts.push('尝试: <strong>' + t.attempts + '次</strong>');
+    if (parts.length) html += '<span class="timing-info">⏱ ' + parts.join(' | ') + '</span>';
+  }
   // 客户端 headers（可折叠）
   if (turn.client_headers) {
     html += '<details style="font-size:11px"><summary style="cursor:pointer;color:var(--muted)">📋 请求头</summary>';

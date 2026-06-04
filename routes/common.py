@@ -262,22 +262,36 @@ def forward_with_patches(
     """发送请求并自动打补丁重试。
 
     当上游返回错误且 error_patcher 有匹配补丁时，自动修复并重试。
-    返回 (response, error, patch_logs)。
+    返回 (response, error, patch_logs, timing_dict)。
+    timing_dict 包含: upstream_start_ms, upstream_ttfb_ms, upstream_total_ms
     """
+    import time as _time
     from utils.http import forward_request
     from utils.error_patcher import match as match_patches, apply as apply_patch
 
     patches_applied = []
     current_payload = payload
+    upstream_elapsed_ms = 0
+    upstream_ttfb_ms = 0
+    total_attempt_start = _time.time()
 
     for attempt in range(max_retries + 1):
+        t0 = _time.time()
         resp, err = forward_request(url, headers, current_payload, stream=stream)
+        upstream_elapsed_ms = int((_time.time() - t0) * 1000)
+        # TTFB: 对于非流式就是总耗时，对于流式连接建立就是 TTFB
+        upstream_ttfb_ms = upstream_elapsed_ms  # requests 库连接+响应头时间
 
         if not err:
             if patches_applied:
                 logger.info('[补丁] 重试成功 (尝试 %d 次, 补丁: %s)',
                             attempt, ', '.join(p['name'] for p in patches_applied))
-            return resp, None, patches_applied
+            timing = {
+                'upstream_ttfb_ms': upstream_ttfb_ms,
+                'upstream_total_ms': upstream_elapsed_ms,
+                'attempts': attempt + 1,
+            }
+            return resp, None, patches_applied, timing
 
         # 最后一次尝试不重试
         if attempt >= max_retries:
@@ -305,4 +319,10 @@ def forward_with_patches(
         logger.warning('[补丁] 所有重试失败 (%d 次), 补丁: %s',
                        len(patches_applied),
                        ', '.join(p['name'] for p in patches_applied))
-    return None, err, patches_applied
+    timing = {
+        'upstream_ttfb_ms': upstream_ttfb_ms,
+        'upstream_total_ms': upstream_elapsed_ms,
+        'attempts': max_retries + 1,
+        'error': str(err)[:200],
+    }
+    return None, err, patches_applied, timing

@@ -33,6 +33,7 @@ from adapters.responses_cc_adapter import (
 )
 from config import Config
 from routes.common import (
+    forward_with_patches,
     RouteContext,
     apply_body_modifications,
     apply_header_modifications,
@@ -205,12 +206,13 @@ def _handle_openai_non_stream(
     """处理 OpenAI 兼容后端的非流式返回。"""
     payload['stream'] = False
     attach_upstream_request(turn, payload, headers)
-    resp, err, patches = forward_with_patches(
+    resp, err, patches, timing = forward_with_patches(
         url, headers, payload,
         upstream_model=ctx.upstream_model, client_type='', stream=False,
     )
     if patches and turn:
         turn['_patches_applied'] = [p['description'] for p in patches]
+        if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)
@@ -237,12 +239,13 @@ def _handle_openai_stream(
     def generate():
         """消费上游 OpenAI SSE，并逐段产出给 Cursor 的聊天补全流。"""
         attach_upstream_request(turn, payload, headers)
-        resp, err, patches = forward_with_patches(
+        resp, err, patches, timing = forward_with_patches(
             url, headers, payload,
             upstream_model=ctx.upstream_model, client_type='', stream=True,
         )
         if patches and turn:
             turn['_patches_applied'] = [p['description'] for p in patches]
+            if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
@@ -358,9 +361,10 @@ def _handle_responses_non_stream(
     """处理原生 Responses 后端的非流式返回。"""
     payload['stream'] = False
     attach_upstream_request(turn, payload, headers)
-    resp, err, patches = forward_with_patches(
+    resp, err, patches, timing = forward_with_patches(
         url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
     if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+    if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)
@@ -388,9 +392,10 @@ def _handle_responses_stream(
     def generate():
         """消费上游 Responses 事件，并实时转换成聊天补全 chunk。"""
         attach_upstream_request(turn, payload, headers)
-        resp, err, patches = forward_with_patches(
+        resp, err, patches, timing = forward_with_patches(
             url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=True)
         if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+        if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
@@ -477,9 +482,10 @@ def _handle_gemini_non_stream(
 ):
     """处理 Gemini 后端的非流式返回。"""
     attach_upstream_request(turn, payload, headers)
-    resp, err, patches = forward_with_patches(
+    resp, err, patches, timing = forward_with_patches(
         url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
     if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+    if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)
@@ -505,9 +511,10 @@ def _handle_gemini_stream(
 
     def generate():
         attach_upstream_request(turn, payload, headers)
-        resp, err, patches = forward_with_patches(
+        resp, err, patches, timing = forward_with_patches(
             url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=True)
         if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+        if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
@@ -597,9 +604,10 @@ def _handle_anthropic_non_stream(
     """处理 Anthropic 后端的非流式返回。"""
     payload['stream'] = False
     attach_upstream_request(turn, payload, headers)
-    resp, err, patches = forward_with_patches(
+    resp, err, patches, timing = forward_with_patches(
         url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
     if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+    if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)
@@ -631,12 +639,13 @@ def _handle_anthropic_stream(
     def generate():
         """消费上游 Anthropic 事件流，并逐步映射为聊天补全 SSE。"""
         attach_upstream_request(turn, payload, headers)
-        resp, err, patches = forward_with_patches(
+        resp, err, patches, timing = forward_with_patches(
             url, headers, payload,
             upstream_model=ctx.upstream_model, client_type='', stream=True,
         )
         if patches and turn:
             turn['_patches_applied'] = [p['description'] for p in patches]
+            if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
