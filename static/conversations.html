@@ -97,6 +97,7 @@
           <button class="btn btn-ghost btn-sm" id="btnContrast" onclick="toggleContrast()">
             &#x25B3; 对比视图
           </button>
+          <button class="btn btn-ghost btn-sm" onclick="copyConversation()">&#x1F4CB; 复制对话</button>
           <button class="btn btn-ghost btn-sm" onclick="scrollToBottom()">&#x2193; 底部</button>
         </div>
 
@@ -118,26 +119,6 @@
           <div class="chat-messages" id="chatMessages"></div>
         </div>
 
-        <!-- 播放控制条 -->
-        <div class="playback-bar" id="playbackBar" style="display:none">
-          <div class="playback-progress" id="playbackProgress">
-            <div class="playback-track">
-              <div class="playback-fill" id="playbackFill"></div>
-            </div>
-            <span class="playback-text" id="playbackText">0 / 0</span>
-          </div>
-          <div class="playback-controls">
-            <button class="btn btn-ghost btn-sm" onclick="playbackPrev()" title="上一个turn">&#x23EE;</button>
-            <button class="btn btn-primary btn-sm" id="btnPlay" onclick="togglePlay()">&#x25B6; 播放</button>
-            <button class="btn btn-ghost btn-sm" onclick="playbackNext()" title="下一个turn">&#x23ED;</button>
-            <span class="speed-group">
-              <button class="speed-btn active" data-speed="1" onclick="setSpeed(1)">1x</button>
-              <button class="speed-btn" data-speed="3" onclick="setSpeed(3)">3x</button>
-              <button class="speed-btn" data-speed="10" onclick="setSpeed(10)">10x</button>
-              <button class="speed-btn" data-speed="0" onclick="setSpeed(0)">瞬间</button>
-            </span>
-          </div>
-        </div>
       </div>
     </section>
   </main>

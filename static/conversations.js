@@ -205,10 +205,6 @@ function escAttr(s) {
 /* ===== 打开会话 ===== */
 var currentDoc = null;
 var currentTurnIdx = 0;
-var playbackTimer = null;
-var playbackIdx = 0;
-var playbackSpeed = 1;
-var isPlaying = false;
 var contrastOpen = false;
 
 async function openConversation(convId, date) {
@@ -216,7 +212,6 @@ async function openConversation(convId, date) {
   currentConvId = convId;
   currentDate = date;
   currentTurnIdx = 0;
-  stopPlayback();
 
   // 高亮列表项
   renderConversationList();
@@ -231,7 +226,6 @@ async function openConversation(convId, date) {
     '<div class="empty" style="padding:40px">加载中…</div>';
   document.getElementById('turnBar').innerHTML = '';
   document.getElementById('convMeta').innerHTML = '';
-  document.getElementById('playbackBar').style.display = 'none';
 
   try {
     var t0 = performance.now();
@@ -272,9 +266,6 @@ function loadTurn(idx) {
   if (idx < 0) idx = 0;
   if (idx >= totalTurns) idx = totalTurns - 1;
   currentTurnIdx = idx;
-  stopPlayback();
-
-  // 如果目标 turn 未加载，异步取回
   if (!currentDoc.turns[idx]) {
     document.getElementById('chatMessages').innerHTML =
       '<div class="empty" style="padding:40px">加载 Turn ' + (idx + 1) + '…</div>';
@@ -286,7 +277,6 @@ function loadTurn(idx) {
   renderTurnBar();
   renderConvMeta(turn);
   renderMessages(turn);
-  setupPlayback(turn);
 
   // 滚动到顶部
   document.getElementById('chatViewport').scrollTop = 0;
@@ -377,18 +367,39 @@ function renderMessages(turn) {
     html += renderErrorBubble(turn.error);
   }
 
-  // 4. 流式数据占位（将由播放器填充）
+  // 4. 流式数据直接折叠渲染（不再需要手动播放）
   if (turn.stream && turn.stream_trace && turn.stream_trace.client_events &&
       turn.stream_trace.client_events.length > 0) {
-    console.log('[前端] 创建流式占位, client_events=%d条', turn.stream_trace.client_events.length);
-    html += '<div id="streamPlaceholder" class="chat-msg assistant">';
-    html += '<div class="chat-avatar">🤖</div>';
-    html += '<div class="chat-bubble" id="streamContent" style="min-height:20px">';
-    html += '<span class="cursor-blink" id="streamCursor"></span>';
-    html += '</div>';
-    html += '</div>';
-  } else {
-    console.log('[前端] 无流式数据 stream=%s hasTrace=%s', turn.stream, !!turn.stream_trace);
+    var folded = foldStreamEvents(turn.stream_trace.client_events);
+    if (folded.content || folded.reasoning) {
+      html += '<div class="chat-msg assistant">';
+      html += '<div class="chat-avatar">🤖</div>';
+      html += '<div class="chat-bubble">';
+      if (folded.reasoning) {
+        html += '<details style="margin-bottom:8px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">💭 思考过程 (' +
+          folded.reasoning.length + ' 字符)</summary>';
+        html += '<div style="margin-top:4px;color:var(--muted);font-style:italic;white-space:pre-wrap;font-size:12px">' +
+          escHtml(folded.reasoning) + '</div></details>';
+      }
+      if (folded.content) {
+        html += renderMarkdown(folded.content);
+      }
+      if (folded.toolCalls.length > 0) {
+        html += '<div class="tool-calls-block">';
+        folded.toolCalls.forEach(function(tc) {
+          var func = tc.function || {};
+          var args = '';
+          try { args = JSON.stringify(JSON.parse(func.arguments || '{}'), null, 2); } catch(e) { args = func.arguments || ''; }
+          html += '<div class="tool-call-card">';
+          html += '<div class="tool-call-header"><span class="tool-call-icon">🔧</span>';
+          html += '<span class="tool-call-name">' + escHtml(func.name || 'unknown') + '</span>';
+          html += '<span class="tool-call-id">' + escHtml(tc.id || '') + '</span></div>';
+          html += '<div class="tool-call-body">' + escHtml(args) + '</div></div>';
+        });
+        html += '</div>';
+      }
+      html += '</div></div>';
+    }
   }
 
   // 5. 流式摘要
@@ -613,206 +624,27 @@ function renderMarkdown(text) {
     escHtml(text) + '</pre>';
 }
 
-/* ===== 流式回放 ===== */
-function setupPlayback(turn) {
-  stopPlayback();
-  var bar = document.getElementById('playbackBar');
-  var trace = turn.stream_trace;
-
-  console.log('[前端] setupPlayback stream=%s hasTrace=%s events=%d',
-    turn.stream, !!trace, trace ? (trace.client_events ? trace.client_events.length : 0) : 0);
-
-  if (!turn.stream || !trace || !trace.client_events || !trace.client_events.length) {
-    bar.style.display = 'none';
-    var cursor = document.getElementById('streamCursor');
-    if (cursor) cursor.style.display = 'none';
-    console.log('[前端] setupPlayback: 播放条隐藏');
-    return;
-  }
-
-  bar.style.display = 'flex';
-  playbackIdx = 0;
-  document.getElementById('playbackFill').style.width = '0%';
-  document.getElementById('playbackText').textContent = '0 / ' + trace.client_events.length;
-  updatePlayButton();
-  console.log('[前端] setupPlayback: 播放条显示, 就绪');
-}
-
-function startPlayback() {
-  console.log('[前端] startPlayback 被调用');
-  var turn = currentDoc.turns[currentTurnIdx];
-  if (!turn) { console.error('[前端] startPlayback: turn 不存在'); return; }
-  var trace = turn.stream_trace;
-  if (!trace || !trace.client_events || !trace.client_events.length) {
-    console.log('[前端] startPlayback: 无流式数据 trace=%s events=%d',
-      !!trace, trace ? trace.client_events.length : 0);
-    return;
-  }
-
-  isPlaying = true;
-  updatePlayButton();
-  var cursor = document.getElementById('streamCursor');
-  if (cursor) cursor.style.display = 'inline-block';
-  console.log('[前端] 开始流式回放 %d 个事件, 速度=%dx', trace.client_events.length, playbackSpeed);
-  playbackStep();
-}
-
-function playbackStep() {
-  if (!isPlaying) return;
-
-  try {
-  var turn = currentDoc.turns[currentTurnIdx];
-  var trace = turn.stream_trace;
-  var events = trace.client_events;
-
-  if (playbackIdx >= events.length) {
-    stopPlayback();
-    var cursor = document.getElementById('streamCursor');
-    if (cursor) cursor.style.display = 'none';
-    console.log('[前端] 回放完成 %d/%d', playbackIdx, events.length);
-    return;
-  }
-
-  var event = events[playbackIdx];
-  if (event) {
-    appendStreamChunk(event);
-  }
-  playbackIdx++;
-
-  // 更新进度条
-  document.getElementById('playbackFill').style.width = (playbackIdx / events.length * 100) + '%';
-  document.getElementById('playbackText').textContent = playbackIdx + ' / ' + events.length;
-
-  // 自动滚动
-  document.getElementById('chatViewport').scrollTop = document.getElementById('chatViewport').scrollHeight;
-
-  // 根据速度安排下一步
-  if (playbackSpeed === 0) {
-    if (playbackIdx < events.length) {
-      requestAnimationFrame(playbackStep);
-    } else {
-      stopPlayback();
-      var c = document.getElementById('streamCursor');
-      if (c) c.style.display = 'none';
+/* ===== 流式事件折叠为完整文本 ===== */
+function foldStreamEvents(events) {
+  var content = '';
+  var reasoning = '';
+  var toolCalls = [];
+  events.forEach(function(event) {
+    var data = (event && event.data) ? event.data : event;
+    if (!data) return;
+    var chunk = data;
+    if (typeof chunk === 'string') {
+      try { chunk = JSON.parse(chunk); } catch(e) { return; }
     }
-  } else {
-    playbackTimer = setTimeout(playbackStep, Math.round(40 / playbackSpeed));
-  }
-  } catch(e) {
-    console.error('[前端] playbackStep 崩溃:', e);
-    stopPlayback();
-  }
-}
-
-function appendStreamChunk(event) {
-  try {
-  var container = document.getElementById('streamContent');
-  if (!container) { console.log('[前端] appendStreamChunk: streamContent 不存在'); return; }
-
-  var cursor = document.getElementById('streamCursor');
-  var data = (event && event.data) ? event.data : event;
-  if (!data) return;  // 跳过 null/undefined data
-
-  // 解析 chunk 数据
-  var chunk;
-  if (typeof data === 'string') {
-    try { chunk = JSON.parse(data); } catch (e) { return; }
-  } else {
-    chunk = data;
-  }
-
-  if (!chunk || !chunk.choices || !chunk.choices.length) return;
-
-  var delta = chunk.choices[0].delta || {};
-  var text = '';
-
-  if (delta.reasoning_content) {
-    text += '<span style="color:var(--muted);font-style:italic">' +
-      escHtml(delta.reasoning_content) + '</span>';
-  }
-  if (delta.content) {
-    text += renderMarkdown(delta.content);
-  }
-  if (delta.tool_calls) {
-    delta.tool_calls.forEach(function (tc) {
-      var func = tc.function || {};
-      var name = func.name || '?';
-      text += '<div class="tool-call-card" style="margin:4px 0">';
-      text += '<div class="tool-call-header">🔧 ' + escHtml(name);
-      text += '</div></div>';
-    });
-  }
-
-  if (text && cursor) {
-    var span = document.createElement('span');
-    span.innerHTML = text;
-    container.insertBefore(span, cursor);
-  }
-  } catch(e) {
-    console.error('[前端] appendStreamChunk 崩溃 event#', playbackIdx, e);
-  }
-}
-
-function stopPlayback() {
-  isPlaying = false;
-  if (playbackTimer) {
-    clearTimeout(playbackTimer);
-    playbackTimer = null;
-  }
-  updatePlayButton();
-  console.log('[前端] 回放已停止');
-}
-
-function togglePlay() {
-  console.log('[前端] togglePlay 被点击 isPlaying=%s', isPlaying);
-  try {
-  if (isPlaying) {
-    stopPlayback();
-  } else {
-    var turn = currentDoc.turns[currentTurnIdx];
-    if (!turn) { console.error('[前端] togglePlay: turn 不存在'); return; }
-    var trace = turn.stream_trace;
-    if (trace && trace.client_events && playbackIdx >= trace.client_events.length) {
-      console.log('[前端] 重置回放到开头');
-      playbackIdx = 0;
-      var sc = document.getElementById('streamContent');
-      if (sc) sc.innerHTML = '<span class="cursor-blink" id="streamCursor"></span>';
-      document.getElementById('playbackFill').style.width = '0%';
-      document.getElementById('playbackText').textContent = '0 / ' + trace.client_events.length;
+    if (!chunk || !chunk.choices || !chunk.choices.length) return;
+    var delta = chunk.choices[0].delta || {};
+    if (delta.reasoning_content) reasoning += delta.reasoning_content;
+    if (delta.content) content += delta.content;
+    if (delta.tool_calls) {
+      delta.tool_calls.forEach(function(tc) { toolCalls.push(tc); });
     }
-    startPlayback();
-  }
-  } catch(e) {
-    console.error('[前端] togglePlay 崩溃:', e);
-  }
-}
-
-function updatePlayButton() {
-  var btn = document.getElementById('btnPlay');
-  if (isPlaying) {
-    btn.innerHTML = '⏸ 暂停';
-  } else {
-    btn.innerHTML = '▶ 播放';
-  }
-}
-
-function setSpeed(speed) {
-  playbackSpeed = speed;
-  document.querySelectorAll('.speed-btn').forEach(function (b) {
-    b.classList.toggle('active', parseInt(b.getAttribute('data-speed')) === speed);
   });
-}
-
-function playbackPrev() {
-  if (currentTurnIdx > 0) {
-    loadTurn(currentTurnIdx - 1);
-  }
-}
-
-function playbackNext() {
-  if (currentDoc && currentTurnIdx < currentDoc.turns.length - 1) {
-    loadTurn(currentTurnIdx + 1);
-  }
+  return { content: content, reasoning: reasoning, toolCalls: toolCalls };
 }
 
 /* ===== 对比视图 ===== */
@@ -882,6 +714,124 @@ function toggleLiveUpdates() {
       dot.classList.remove('live-on');
     }
   }
+}
+
+/* ===== 复制对话 ===== */
+function copyConversation() {
+  if (!currentDoc) { toast('请先选择一条会话', false); return; }
+  var turn = currentDoc.turns[currentTurnIdx];
+  if (!turn) { toast('当前 turn 数据为空', false); return; }
+
+  var lines = [];
+  lines.push('=== 会话: ' + currentConvId + ' ===');
+  lines.push('模型: ' + (turn.client_model || '?') +
+    ' | 后端: ' + (turn.backend || '?') +
+    ' | 上游: ' + (turn.upstream_model || '?') +
+    ' | 流式: ' + (turn.stream ? '是' : '否'));
+  if (turn.duration_ms) lines.push('耗时: ' + (turn.duration_ms / 1000).toFixed(1) + 's');
+  if (turn.usage) {
+    lines.push('Token: ' + (turn.usage.prompt_tokens || 0) + ' in / ' +
+      (turn.usage.completion_tokens || 0) + ' out');
+  }
+  lines.push('Turn ' + (currentTurnIdx + 1) + ' / ' +
+    (currentDoc._allTurnCount || currentDoc.turns.length));
+  lines.push('');
+
+  // 消息
+  var msgs = (turn.client_request && turn.client_request.messages) || [];
+  msgs.forEach(function(msg, i) {
+    var role = (msg.role || 'unknown').toUpperCase();
+    var content = msg.content;
+    var text = '';
+    if (typeof content === 'string') {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content.map(function(p) {
+        if (p.type === 'text') return p.text || '';
+        if (p.type === 'image_url') return '[图片: ' + (p.image_url && p.image_url.url ? p.image_url.url.substring(0, 80) : '') + ']';
+        return '[' + (p.type || '?') + ']';
+      }).join('\n');
+    } else if (content) {
+      text = JSON.stringify(content);
+    }
+    lines.push('--- ' + role + ' ---');
+    // 工具调用
+    if (msg.tool_calls && msg.tool_calls.length) {
+      lines.push('[工具调用: ' + msg.tool_calls.map(function(tc) {
+        return (tc.function || {}).name || '?';
+      }).join(', ') + ']');
+    }
+    if (msg.tool_call_id) {
+      lines.push('[tool_call_id: ' + msg.tool_call_id + ']');
+    }
+    lines.push(text.substring(0, 2000)); // 每条消息最多 2000 字符
+    if (text.length > 2000) lines.push('... (截断, 完整长度: ' + text.length + ' 字符)');
+    lines.push('');
+  });
+
+  // 流式响应
+  if (turn.stream && turn.stream_trace) {
+    var folded = foldStreamEvents(turn.stream_trace.client_events || []);
+    if (folded.reasoning) {
+      lines.push('--- ASSISTANT (思考) ---');
+      lines.push(folded.reasoning.substring(0, 3000));
+      if (folded.reasoning.length > 3000) lines.push('... (截断, 完整: ' + folded.reasoning.length + ' 字符)');
+      lines.push('');
+    }
+    if (folded.content) {
+      lines.push('--- ASSISTANT (回复) ---');
+      lines.push(folded.content.substring(0, 5000));
+      if (folded.content.length > 5000) lines.push('... (截断, 完整: ' + folded.content.length + ' 字符)');
+      lines.push('');
+    }
+    if (folded.toolCalls.length) {
+      lines.push('--- ASSISTANT (工具调用) ---');
+      folded.toolCalls.forEach(function(tc) {
+        var func = tc.function || {};
+        lines.push('  ' + (func.name || '?') + ': ' +
+          (func.arguments || '').substring(0, 500));
+      });
+      lines.push('');
+    }
+  }
+
+  // 错误
+  if (turn.error) {
+    lines.push('--- ERROR ---');
+    if (typeof turn.error === 'string') {
+      lines.push(turn.error);
+    } else if (turn.error && typeof turn.error === 'object') {
+      lines.push('阶段: ' + (turn.error.stage || 'unknown'));
+      lines.push('消息: ' + (turn.error.message || JSON.stringify(turn.error)));
+    }
+    lines.push('');
+  }
+
+  // 流式摘要
+  if (turn.stream && turn.stream_trace && turn.stream_trace.summary) {
+    var sum = turn.stream_trace.summary;
+    lines.push('--- 流式摘要 ---');
+    lines.push('事件数: ' + (sum.chunk_count || sum.event_count || 0));
+    if (sum.usage) lines.push('Token: ' + (sum.usage.prompt_tokens || 0) +
+      ' in / ' + (sum.usage.completion_tokens || 0) + ' out');
+    lines.push('');
+  }
+
+  var text = lines.join('\n');
+  navigator.clipboard.writeText(text).then(function() {
+    toast('已复制 ' + lines.length + ' 行对话信息');
+  }).catch(function() {
+    // Fallback: 选中文本让用户手动复制
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('已复制对话信息');
+  });
 }
 
 /* ===== 辅助 ===== */
