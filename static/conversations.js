@@ -873,14 +873,14 @@ function startLiveSSE() {
 
 function toggleLiveUpdates() {
   liveEnabled = !liveEnabled;
+  // 只用 class 切换，不用 innerHTML（避免 DOM 引用失效）
   var dot = document.getElementById('liveDot');
-  var btn = document.getElementById('liveToggleBtn');
-  if (liveEnabled) {
-    dot.classList.add('live-on');
-    btn.innerHTML = '<span class="live-dot live-on"></span> 实时';
-  } else {
-    dot.classList.remove('live-on');
-    btn.innerHTML = '<span class="live-dot"></span> 实时';
+  if (dot) {
+    if (liveEnabled) {
+      dot.classList.add('live-on');
+    } else {
+      dot.classList.remove('live-on');
+    }
   }
 }
 
