@@ -235,13 +235,21 @@ async function openConversation(convId, date) {
 
   try {
     var t0 = performance.now();
-    var params = date ? '?date=' + encodeURIComponent(date) : '';
+    // 先用 summary 模式获取整体结构（轻量），同时加载第一个 turn 的详情
+    var params = '?turn=0';
+    if (date) params += '&date=' + encodeURIComponent(date);
     var data = await api('/api/admin/logs/' + encodeURIComponent(convId) + params);
     var apiMs = (performance.now() - t0).toFixed(0);
     var doc = data.conversation;
-    var turns = doc.turns || [];
-    console.log('[前端] API /api/admin/logs/%s 返回%d turns, 耗时 %s ms', convId, turns.length, apiMs);
+    var totalTurns = doc._total_turns || 1;
+    console.log('[前端] API /api/admin/logs/%s?turn=0 总turns=%d, 耗时 %s ms', convId, totalTurns, apiMs);
+    // 补全 turn 数组以便 turn bar 渲染
     currentDoc = doc;
+    currentDoc._allTurnCount = totalTurns;
+    // 为其他未加载的 turn 创建占位
+    while (currentDoc.turns.length < totalTurns) {
+      currentDoc.turns.push(null);
+    }
     loadTurn(0);
     console.timeEnd('[前端] 打开会话');
   } catch (e) {
@@ -260,10 +268,19 @@ function loadTurn(idx) {
     console.timeEnd('[前端] 渲染Turn');
     return;
   }
+  var totalTurns = currentDoc._allTurnCount || currentDoc.turns.length;
   if (idx < 0) idx = 0;
-  if (idx >= currentDoc.turns.length) idx = currentDoc.turns.length - 1;
+  if (idx >= totalTurns) idx = totalTurns - 1;
   currentTurnIdx = idx;
   stopPlayback();
+
+  // 如果目标 turn 未加载，异步取回
+  if (!currentDoc.turns[idx]) {
+    document.getElementById('chatMessages').innerHTML =
+      '<div class="empty" style="padding:40px">加载 Turn ' + (idx + 1) + '…</div>';
+    fetchTurn(idx);
+    return;
+  }
 
   var turn = currentDoc.turns[idx];
   renderTurnBar();
@@ -276,17 +293,40 @@ function loadTurn(idx) {
   console.timeEnd('[前端] 渲染Turn');
 }
 
+async function fetchTurn(idx) {
+  var params = '?turn=' + idx;
+  if (currentDate) params += '&date=' + encodeURIComponent(currentDate);
+  try {
+    var t0 = performance.now();
+    var data = await api('/api/admin/logs/' + encodeURIComponent(currentConvId) + params);
+    var apiMs = (performance.now() - t0).toFixed(0);
+    var newDoc = data.conversation;
+    var fetchedTurn = newDoc.turns[0];
+    currentDoc.turns[idx] = fetchedTurn;
+    if (newDoc._allTurnCount) currentDoc._allTurnCount = newDoc._allTurnCount;
+    console.log('[前端] fetchTurn(%d) 耗时 %s ms', idx, apiMs);
+    loadTurn(idx);
+  } catch (e) {
+    document.getElementById('chatMessages').innerHTML =
+      '<div class="chat-messages"><div class="chat-msg error"><div class="chat-bubble">加载 Turn ' +
+      (idx + 1) + ' 失败: ' + escHtml(e.message) + '</div></div></div>';
+    console.timeEnd('[前端] 渲染Turn');
+  }
+}
+
 function renderTurnBar() {
-  var turns = currentDoc.turns;
+  var totalTurns = currentDoc._allTurnCount || currentDoc.turns.length;
   var html = '';
-  turns.forEach(function (t, i) {
+  for (var i = 0; i < totalTurns; i++) {
+    var t = currentDoc.turns[i];
     var cls = 'turn-tab';
     if (i === currentTurnIdx) cls += ' active';
-    if (t.error) cls += ' turn-error';
+    if (t && t.error) cls += ' turn-error';
     var label = 'Turn ' + (i + 1);
-    if (t.error) label += ' ⚠';
+    if (!t) label += ' …';
+    else if (t.error) label += ' ⚠';
     html += '<button class="' + cls + '" onclick="loadTurn(' + i + ')">' + label + '</button>';
-  });
+  }
   document.getElementById('turnBar').innerHTML = html;
 }
 

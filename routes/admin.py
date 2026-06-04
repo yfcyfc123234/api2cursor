@@ -822,7 +822,13 @@ def logs_list():
 
 @bp.route('/api/admin/logs/<path:conversation_id>', methods=['GET'])
 def logs_detail(conversation_id: str):
-    """查看某个会话日志的完整内容。"""
+    """查看某个会话日志的完整内容。
+
+    支持参数:
+      ?date=YYYY-MM-DD   指定日期
+      ?turn=N            只返回指定 turn（索引从 0 开始），默认返回全部
+      ?fields=summary    只返回元数据 + turn 摘要，不返回消息体和流式事件
+    """
     import time as _time
     _start = _time.time()
     err = _check_auth()
@@ -830,6 +836,10 @@ def logs_detail(conversation_id: str):
         return err
 
     date = (request.args.get('date') or '').strip() or None
+    turn_idx = request.args.get('turn', '').strip()
+    turn_idx = int(turn_idx) if turn_idx.isdigit() else None
+    fields = (request.args.get('fields') or '').strip().lower()
+
     fp = _find_conversation_file(conversation_id, date)
     if not fp:
         return jsonify({'error': '日志不存在'}), 404
@@ -843,6 +853,34 @@ def logs_detail(conversation_id: str):
     except (OSError, json.JSONDecodeError):
         return jsonify({'error': '日志读取失败'}), 500
 
+    # 按需裁剪：仅返回指定 turn
+    if turn_idx is not None:
+        all_turns = doc.get('turns', [])
+        if 0 <= turn_idx < len(all_turns):
+            turn = all_turns[turn_idx]
+            doc['turns'] = [turn]
+            doc['turn_count'] = len(all_turns)
+            doc['_current_turn'] = turn_idx
+            doc['_total_turns'] = len(all_turns)
+        else:
+            return jsonify({'error': 'turn 索引超出范围', 'total_turns': len(all_turns)}), 400
+
+    # summary 模式：移除消息体和流式事件中的详细数据
+    if fields == 'summary':
+        for turn in doc.get('turns', []):
+            cr = turn.get('client_request', {})
+            if isinstance(cr, dict):
+                msgs = cr.get('messages', [])
+                cr['messages'] = [{'role': m.get('role', '?'),
+                                   '_content_len': len(json.dumps(m.get('content', ''), ensure_ascii=False))}
+                                  for m in msgs]
+            turn.pop('upstream_request', None)
+            turn.pop('upstream_response', None)
+            st = turn.get('stream_trace', {})
+            if isinstance(st, dict):
+                st.pop('upstream_events', None)
+                st.pop('client_events', None)
+
     notes = _load_log_notes()
     note_entry = notes.get(conversation_id) or {}
     result = {
@@ -851,9 +889,10 @@ def logs_detail(conversation_id: str):
     }
     total_ms = (_time.time() - _start) * 1000
     fsize_kb = len(raw) / 1024
-    turn_count = len(doc.get('turns', []))
-    logger.info('[性能] GET /api/admin/logs/%s 文件大小=%.0fKB turns=%d 读取=%.0fms 解析=%.0fms 总耗时=%.0fms',
-                conversation_id, fsize_kb, turn_count, read_ms, parse_ms, total_ms)
+    all_turn_count = len(doc.get('_total_turns', doc.get('turns', [])))
+    actual_turns = len(doc.get('turns', []))
+    logger.info('[性能] GET /api/admin/logs/%s 文件大小=%.0fKB 总turns=%d 返回turns=%d 读取=%.0fms 解析=%.0fms 总耗时=%.0fms',
+                conversation_id, fsize_kb, all_turn_count, actual_turns, read_ms, parse_ms, total_ms)
     return jsonify(result)
 
 
