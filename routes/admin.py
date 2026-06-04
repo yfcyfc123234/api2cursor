@@ -739,6 +739,8 @@ def logs_count():
 @bp.route('/api/admin/logs', methods=['GET'])
 def logs_list():
     """列出最近的会话日志（历史）。"""
+    import time as _time
+    _start = _time.time()
     err = _check_auth()
     if err:
         return err
@@ -765,6 +767,8 @@ def logs_list():
                 'turn_count': row['turn_count'],
                 'note': (notes.get(cid) or {}).get('note', ''),
             })
+        t = (_time.time() - _start) * 1000
+        logger.info('[性能] GET /api/admin/logs 索引分支 limit=%d q=%s 返回%d条 耗时%.0fms', limit, q or '-', len(items), t)
         return jsonify({'items': items})
 
     files = _list_conversation_files()
@@ -811,12 +815,16 @@ def logs_list():
         if len(items) >= limit:
             break
 
+    t = (_time.time() - _start) * 1000
+    logger.info('[性能] GET /api/admin/logs glob分支 limit=%d q=%s 返回%d条 耗时%.0fms', limit, q or '-', len(items), t)
     return jsonify({'items': items})
 
 
 @bp.route('/api/admin/logs/<path:conversation_id>', methods=['GET'])
 def logs_detail(conversation_id: str):
     """查看某个会话日志的完整内容。"""
+    import time as _time
+    _start = _time.time()
     err = _check_auth()
     if err:
         return err
@@ -828,16 +836,25 @@ def logs_detail(conversation_id: str):
 
     try:
         with open(fp, 'r', encoding='utf-8') as f:
-            doc = json.load(f)
+            raw = f.read()
+        read_ms = (_time.time() - _start) * 1000
+        doc = json.loads(raw)
+        parse_ms = (_time.time() - _start) * 1000 - read_ms
     except (OSError, json.JSONDecodeError):
         return jsonify({'error': '日志读取失败'}), 500
 
     notes = _load_log_notes()
     note_entry = notes.get(conversation_id) or {}
-    return jsonify({
+    result = {
         'conversation': doc,
         'note': note_entry.get('note', ''),
-    })
+    }
+    total_ms = (_time.time() - _start) * 1000
+    fsize_kb = len(raw) / 1024
+    turn_count = len(doc.get('turns', []))
+    logger.info('[性能] GET /api/admin/logs/%s 文件大小=%.0fKB turns=%d 读取=%.0fms 解析=%.0fms 总耗时=%.0fms',
+                conversation_id, fsize_kb, turn_count, read_ms, parse_ms, total_ms)
+    return jsonify(result)
 
 
 @bp.route('/api/admin/logs/<path:conversation_id>', methods=['DELETE'])

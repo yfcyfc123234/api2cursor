@@ -111,11 +111,18 @@ function onSearch() {
 }
 
 async function loadConversationList() {
+  console.time('[前端] 加载会话列表');
   try {
+    var t0 = performance.now();
     var data = await api('/api/admin/logs?limit=200');
+    var apiMs = (performance.now() - t0).toFixed(0);
+    console.log('[前端] API /api/admin/logs 返回 %d 条, 耗时 %s ms', (data.items || []).length, apiMs);
+
     CONVERSATIONS = data.items || [];
     renderConversationList();
+    console.timeEnd('[前端] 加载会话列表');
   } catch (e) {
+    console.timeEnd('[前端] 加载会话列表');
     toast('加载列表失败: ' + e.message, false);
     document.getElementById('convList').innerHTML = '<div class="empty">加载失败</div>';
   }
@@ -141,6 +148,7 @@ function sortConversations(items) {
 }
 
 function renderConversationList() {
+  var t0 = performance.now();
   var listEl = document.getElementById('convList');
   var search = (document.getElementById('convSearch').value || '').toLowerCase();
 
@@ -181,6 +189,7 @@ function renderConversationList() {
     html += '</div>';
   });
   listEl.innerHTML = html;
+  console.log('[前端] 渲染列表 %d 条, 耗时 %.0f ms', sorted.length, performance.now() - t0);
 }
 
 function escHtml(s) {
@@ -203,6 +212,7 @@ var isPlaying = false;
 var contrastOpen = false;
 
 async function openConversation(convId, date) {
+  console.time('[前端] 打开会话');
   currentConvId = convId;
   currentDate = date;
   currentTurnIdx = 0;
@@ -224,11 +234,18 @@ async function openConversation(convId, date) {
   document.getElementById('playbackBar').style.display = 'none';
 
   try {
+    var t0 = performance.now();
     var params = date ? '?date=' + encodeURIComponent(date) : '';
     var data = await api('/api/admin/logs/' + encodeURIComponent(convId) + params);
-    currentDoc = data.conversation;
+    var apiMs = (performance.now() - t0).toFixed(0);
+    var doc = data.conversation;
+    var turns = doc.turns || [];
+    console.log('[前端] API /api/admin/logs/%s 返回%d turns, 耗时 %s ms', convId, turns.length, apiMs);
+    currentDoc = doc;
     loadTurn(0);
+    console.timeEnd('[前端] 打开会话');
   } catch (e) {
+    console.timeEnd('[前端] 打开会话');
     document.getElementById('chatMessages').innerHTML =
       '<div class="chat-messages"><div class="chat-msg error"><div class="chat-bubble">加载失败: ' +
       escHtml(e.message) + '</div></div></div>';
@@ -236,9 +253,11 @@ async function openConversation(convId, date) {
 }
 
 function loadTurn(idx) {
+  console.time('[前端] 渲染Turn');
   if (!currentDoc || !currentDoc.turns || !currentDoc.turns.length) {
     document.getElementById('chatMessages').innerHTML =
       '<div class="empty">该会话没有 turn 数据</div>';
+    console.timeEnd('[前端] 渲染Turn');
     return;
   }
   if (idx < 0) idx = 0;
@@ -254,6 +273,7 @@ function loadTurn(idx) {
 
   // 滚动到顶部
   document.getElementById('chatViewport').scrollTop = 0;
+  console.timeEnd('[前端] 渲染Turn');
 }
 
 function renderTurnBar() {
@@ -292,6 +312,7 @@ function renderConvMeta(turn) {
 
 /* ===== 消息渲染 ===== */
 function renderMessages(turn) {
+  var t0 = performance.now();
   var chatEl = document.getElementById('chatMessages');
   var html = '<div class="chat-messages">';
 
@@ -360,6 +381,13 @@ function renderMessages(turn) {
       this.nextElementSibling.classList.toggle('open');
     });
   });
+
+  var msgs = (turn.client_request && turn.client_request.messages) || [];
+  console.log('[前端] 渲染消息 %d 条 (含%s流式), 耗时 %.0f ms',
+    msgs.length,
+    (turn.stream && turn.stream_trace && turn.stream_trace.client_events &&
+     turn.stream_trace.client_events.length > 0) ? '' : '无',
+    performance.now() - t0);
 }
 
 function renderMessageBubble(msg, idx) {
@@ -556,6 +584,7 @@ function startPlayback() {
   isPlaying = true;
   updatePlayButton();
   document.getElementById('streamCursor').style.display = 'inline-block';
+  console.log('[前端] 开始流式回放 %d 个事件, 速度=%dx', trace.client_events.length, playbackSpeed);
   playbackStep();
 }
 
