@@ -51,6 +51,13 @@ def admin_logs_page():
     return send_from_directory(_STATIC_DIR, 'admin_logs.html')
 
 
+@bp.route('/admin/conversations')
+@bp.route('/admin/conversations/')
+def admin_conversations_page():
+    """返回会话回放分析页。"""
+    return send_from_directory(_STATIC_DIR, 'conversations.html')
+
+
 @bp.route('/static/<path:filename>')
 def static_files(filename):
     """提供管理面板所需的静态资源文件。"""
