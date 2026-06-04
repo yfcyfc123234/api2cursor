@@ -367,39 +367,36 @@ function renderMessages(turn) {
     html += renderErrorBubble(turn.error);
   }
 
-  // 4. 流式数据直接折叠渲染（不再需要手动播放）
-  if (turn.stream && turn.stream_trace && turn.stream_trace.client_events &&
-      turn.stream_trace.client_events.length > 0) {
-    var folded = foldStreamEvents(turn.stream_trace.client_events);
-    if (folded.content || folded.reasoning) {
-      html += '<div class="chat-msg assistant">';
-      html += '<div class="chat-avatar">🤖</div>';
-      html += '<div class="chat-bubble">';
-      if (folded.reasoning) {
-        html += '<details style="margin-bottom:8px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">💭 思考过程 (' +
-          folded.reasoning.length + ' 字符)</summary>';
-        html += '<div style="margin-top:4px;color:var(--muted);font-style:italic;white-space:pre-wrap;font-size:12px">' +
-          escHtml(folded.reasoning) + '</div></details>';
-      }
-      if (folded.content) {
-        html += renderMarkdown(folded.content);
-      }
-      if (folded.toolCalls.length > 0) {
-        html += '<div class="tool-calls-block">';
-        folded.toolCalls.forEach(function(tc) {
-          var func = tc.function || {};
-          var args = '';
-          try { args = JSON.stringify(JSON.parse(func.arguments || '{}'), null, 2); } catch(e) { args = func.arguments || ''; }
-          html += '<div class="tool-call-card">';
-          html += '<div class="tool-call-header"><span class="tool-call-icon">🔧</span>';
-          html += '<span class="tool-call-name">' + escHtml(func.name || 'unknown') + '</span>';
-          html += '<span class="tool-call-id">' + escHtml(tc.id || '') + '</span></div>';
-          html += '<div class="tool-call-body">' + escHtml(args) + '</div></div>';
-        });
-        html += '</div>';
-      }
-      html += '</div></div>';
+  // 4. 流式数据直接渲染（服务端已折叠为文本）
+  var folded = turn.stream_trace && turn.stream_trace.folded;
+  if (folded && (folded.content || folded.reasoning)) {
+    html += '<div class="chat-msg assistant">';
+    html += '<div class="chat-avatar">🤖</div>';
+    html += '<div class="chat-bubble">';
+    if (folded.reasoning) {
+      html += '<details style="margin-bottom:8px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">💭 思考过程 (' +
+        folded.reasoning.length + ' 字符)</summary>';
+      html += '<div style="margin-top:4px;color:var(--muted);font-style:italic;white-space:pre-wrap;font-size:12px">' +
+        escHtml(folded.reasoning) + '</div></details>';
     }
+    if (folded.content) {
+      html += renderMarkdown(folded.content);
+    }
+    if (folded.tool_calls && folded.tool_calls.length > 0) {
+      html += '<div class="tool-calls-block">';
+      folded.tool_calls.forEach(function(tc) {
+        var func = tc.function || {};
+        var args = '';
+        try { args = JSON.stringify(JSON.parse(func.arguments || '{}'), null, 2); } catch(e) { args = func.arguments || ''; }
+        html += '<div class="tool-call-card">';
+        html += '<div class="tool-call-header"><span class="tool-call-icon">🔧</span>';
+        html += '<span class="tool-call-name">' + escHtml(func.name || 'unknown') + '</span>';
+        html += '<span class="tool-call-id">' + escHtml(tc.id || '') + '</span></div>';
+        html += '<div class="tool-call-body">' + escHtml(args) + '</div></div>';
+      });
+      html += '</div>';
+    }
+    html += '</div></div>';
   }
 
   // 5. 流式摘要
@@ -624,29 +621,6 @@ function renderMarkdown(text) {
     escHtml(text) + '</pre>';
 }
 
-/* ===== 流式事件折叠为完整文本 ===== */
-function foldStreamEvents(events) {
-  var content = '';
-  var reasoning = '';
-  var toolCalls = [];
-  events.forEach(function(event) {
-    var data = (event && event.data) ? event.data : event;
-    if (!data) return;
-    var chunk = data;
-    if (typeof chunk === 'string') {
-      try { chunk = JSON.parse(chunk); } catch(e) { return; }
-    }
-    if (!chunk || !chunk.choices || !chunk.choices.length) return;
-    var delta = chunk.choices[0].delta || {};
-    if (delta.reasoning_content) reasoning += delta.reasoning_content;
-    if (delta.content) content += delta.content;
-    if (delta.tool_calls) {
-      delta.tool_calls.forEach(function(tc) { toolCalls.push(tc); });
-    }
-  });
-  return { content: content, reasoning: reasoning, toolCalls: toolCalls };
-}
-
 /* ===== 对比视图 ===== */
 function toggleContrast() {
   var turn = currentDoc.turns[currentTurnIdx];
@@ -716,110 +690,22 @@ function toggleLiveUpdates() {
   }
 }
 
-/* ===== 复制对话 ===== */
+/* ===== 复制对话引用 ===== */
 function copyConversation() {
   if (!currentDoc) { toast('请先选择一条会话', false); return; }
   var turn = currentDoc.turns[currentTurnIdx];
   if (!turn) { toast('当前 turn 数据为空', false); return; }
 
-  var lines = [];
-  lines.push('=== 会话: ' + currentConvId + ' ===');
-  lines.push('模型: ' + (turn.client_model || '?') +
-    ' | 后端: ' + (turn.backend || '?') +
-    ' | 上游: ' + (turn.upstream_model || '?') +
-    ' | 流式: ' + (turn.stream ? '是' : '否'));
-  if (turn.duration_ms) lines.push('耗时: ' + (turn.duration_ms / 1000).toFixed(1) + 's');
-  if (turn.usage) {
-    lines.push('Token: ' + (turn.usage.prompt_tokens || 0) + ' in / ' +
-      (turn.usage.completion_tokens || 0) + ' out');
-  }
-  lines.push('Turn ' + (currentTurnIdx + 1) + ' / ' +
-    (currentDoc._allTurnCount || currentDoc.turns.length));
-  lines.push('');
+  var totalTurns = currentDoc._allTurnCount || currentDoc.turns.length;
+  var model = turn.client_model || '?';
+  var err = turn.error ? ' ⚠有错误' : '';
+  var usage = turn.usage ? (' Token: ' + (turn.usage.prompt_tokens || 0) + ' in / ' + (turn.usage.completion_tokens || 0) + ' out') : '';
 
-  // 消息
-  var msgs = (turn.client_request && turn.client_request.messages) || [];
-  msgs.forEach(function(msg, i) {
-    var role = (msg.role || 'unknown').toUpperCase();
-    var content = msg.content;
-    var text = '';
-    if (typeof content === 'string') {
-      text = content;
-    } else if (Array.isArray(content)) {
-      text = content.map(function(p) {
-        if (p.type === 'text') return p.text || '';
-        if (p.type === 'image_url') return '[图片: ' + (p.image_url && p.image_url.url ? p.image_url.url.substring(0, 80) : '') + ']';
-        return '[' + (p.type || '?') + ']';
-      }).join('\n');
-    } else if (content) {
-      text = JSON.stringify(content);
-    }
-    lines.push('--- ' + role + ' ---');
-    // 工具调用
-    if (msg.tool_calls && msg.tool_calls.length) {
-      lines.push('[工具调用: ' + msg.tool_calls.map(function(tc) {
-        return (tc.function || {}).name || '?';
-      }).join(', ') + ']');
-    }
-    if (msg.tool_call_id) {
-      lines.push('[tool_call_id: ' + msg.tool_call_id + ']');
-    }
-    lines.push(text.substring(0, 2000)); // 每条消息最多 2000 字符
-    if (text.length > 2000) lines.push('... (截断, 完整长度: ' + text.length + ' 字符)');
-    lines.push('');
-  });
+  var text = '会话: ' + currentConvId + '\n' +
+    'Turn: ' + (currentTurnIdx + 1) + '/' + totalTurns + '\n' +
+    '模型: ' + model + ' | 后端: ' + (turn.backend || '?') + '\n' +
+    '流式: ' + (turn.stream ? '是' : '否') + usage + err;
 
-  // 流式响应
-  if (turn.stream && turn.stream_trace) {
-    var folded = foldStreamEvents(turn.stream_trace.client_events || []);
-    if (folded.reasoning) {
-      lines.push('--- ASSISTANT (思考) ---');
-      lines.push(folded.reasoning.substring(0, 3000));
-      if (folded.reasoning.length > 3000) lines.push('... (截断, 完整: ' + folded.reasoning.length + ' 字符)');
-      lines.push('');
-    }
-    if (folded.content) {
-      lines.push('--- ASSISTANT (回复) ---');
-      lines.push(folded.content.substring(0, 5000));
-      if (folded.content.length > 5000) lines.push('... (截断, 完整: ' + folded.content.length + ' 字符)');
-      lines.push('');
-    }
-    if (folded.toolCalls.length) {
-      lines.push('--- ASSISTANT (工具调用) ---');
-      folded.toolCalls.forEach(function(tc) {
-        var func = tc.function || {};
-        lines.push('  ' + (func.name || '?') + ': ' +
-          (func.arguments || '').substring(0, 500));
-      });
-      lines.push('');
-    }
-  }
-
-  // 错误
-  if (turn.error) {
-    lines.push('--- ERROR ---');
-    if (typeof turn.error === 'string') {
-      lines.push(turn.error);
-    } else if (turn.error && typeof turn.error === 'object') {
-      lines.push('阶段: ' + (turn.error.stage || 'unknown'));
-      lines.push('消息: ' + (turn.error.message || JSON.stringify(turn.error)));
-    }
-    lines.push('');
-  }
-
-  // 流式摘要
-  if (turn.stream && turn.stream_trace && turn.stream_trace.summary) {
-    var sum = turn.stream_trace.summary;
-    lines.push('--- 流式摘要 ---');
-    lines.push('事件数: ' + (sum.chunk_count || sum.event_count || 0));
-    if (sum.usage) lines.push('Token: ' + (sum.usage.prompt_tokens || 0) +
-      ' in / ' + (sum.usage.completion_tokens || 0) + ' out');
-    lines.push('');
-  }
-
-  var text = lines.join('\n');
-
-  // 使用 textarea + execCommand（兼容 HTTP 和所有浏览器）
   try {
     var ta = document.createElement('textarea');
     ta.value = text;
@@ -832,12 +718,11 @@ function copyConversation() {
     var ok = document.execCommand('copy');
     document.body.removeChild(ta);
     if (ok) {
-      toast('已复制 ' + lines.length + ' 行对话信息');
+      toast('已复制: ' + currentConvId + ' Turn ' + (currentTurnIdx + 1));
     } else {
-      toast('复制失败，请手动选择文本', false);
+      toast('复制失败，请手动选择', false);
     }
   } catch(e) {
-    console.error('复制失败:', e);
     toast('复制失败: ' + e.message, false);
   }
 }
