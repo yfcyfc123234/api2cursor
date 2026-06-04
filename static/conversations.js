@@ -69,12 +69,17 @@ function doLogout() {
 function autoLogin() {
   // 1. sessionStorage 缓存
   var saved = sessionStorage.getItem('_ak');
-  // 2. URL 参数 ?key=xxx
-  var urlKey = new URLSearchParams(window.location.search).get('key');
-  if (urlKey) saved = urlKey;
+  // 2. URL hash #key=xxx (hash 不发送到服务器，安全)
+  var hash = window.location.hash.substring(1);
+  var hashKey = new URLSearchParams(hash).get('key');
+  if (hashKey) saved = hashKey;
   if (saved) {
     authKey = saved;
     sessionStorage.setItem('_ak', saved);
+    // 清除 hash 中的 key，避免留在地址栏
+    if (hashKey) {
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
     document.getElementById('login').style.display = 'none';
     document.getElementById('dashboard').style.display = 'block';
     loadConversationList();
