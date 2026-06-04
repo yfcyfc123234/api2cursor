@@ -26,6 +26,7 @@ from utils.http import sse_response
 from routes.common import sse_data_message
 from utils import request_logger as request_logger_mod
 from utils import conversation_index as conv_idx
+from utils import conversation_store
 
 logger = logging.getLogger(__name__)
 
@@ -722,23 +723,22 @@ def logs_live_sse():
 
 @bp.route('/api/admin/logs/count', methods=['GET'])
 def logs_count():
-    """返回与「清空历史」相同规则下的会话 JSON 文件数量，供前端判断是否可清空。"""
+    """返回会话数量，优先从数据库读取。"""
     err = _check_auth()
     if err:
         return err
-
-    n_idx = conv_idx.count_rows()
-    if n_idx is not None:
-        return jsonify({'count': n_idx})
-    n = 0
-    if os.path.isdir(_LOG_DIR):
-        n = len(glob.glob(os.path.join(_LOG_DIR, '*', '*.json')))
-    return jsonify({'count': n})
+    try:
+        n = conversation_store.get_conversation_count()
+    except Exception:
+        n = conv_idx.count_rows()
+        if n is None and os.path.isdir(_LOG_DIR):
+            n = len(glob.glob(os.path.join(_LOG_DIR, '*', '*.json')))
+    return jsonify({'count': n or 0})
 
 
 @bp.route('/api/admin/logs', methods=['GET'])
 def logs_list():
-    """列出最近的会话日志（历史）。"""
+    """列出最近的会话日志（历史），优先从数据库读取。"""
     import time as _time
     _start = _time.time()
     err = _check_auth()
@@ -748,37 +748,45 @@ def logs_list():
     limit = int(request.args.get('limit', '30'))
     q = (request.args.get('q') or '').strip()
     date = (request.args.get('date') or '').strip() or None
+    sort = (request.args.get('sort') or 'updated_at').strip()
+    dir_ = (request.args.get('dir') or 'desc').strip()
 
     notes = _load_log_notes()
 
-    idx_rows = conv_idx.list_admin_rows(limit=limit, q=q, date=date)
-    if idx_rows is not None:
+    try:
+        rows = conversation_store.list_conversations(
+            limit=limit, q=q, date=date or '', sort_field=sort, sort_dir=dir_,
+        )
+    except Exception:
+        rows = []
+
+    if rows:
         items: list[dict[str, Any]] = []
-        for row in idx_rows:
-            cid = row['conversation_id']
+        for row in rows:
+            cid = row.get('id', '')
+            updated = row.get('updated_at', '')
             items.append({
                 'conversation_id': cid,
-                'date': row['date'],
-                'route': row['route'],
-                'last_client_model': row['last_client_model'],
-                'last_backend': row['last_backend'],
-                'created_at': row['created_at'],
-                'updated_at': row['updated_at'],
-                'turn_count': row['turn_count'],
+                'date': updated[:10] if updated else '',
+                'route': row.get('route', '') or '',
+                'last_client_model': row.get('last_client_model', '') or '',
+                'last_backend': row.get('last_backend', '') or '',
+                'created_at': row.get('created_at', '') or '',
+                'updated_at': updated or '',
+                'turn_count': int(row.get('turn_count', 0) or 0),
+                'has_error': bool(row.get('has_error', 0)),
                 'note': (notes.get(cid) or {}).get('note', ''),
             })
         t = (_time.time() - _start) * 1000
-        logger.info('[性能] GET /api/admin/logs 索引分支 limit=%d q=%s 返回%d条 耗时%.0fms', limit, q or '-', len(items), t)
+        logger.info('[性能] GET /api/admin/logs DB 返回%d条 耗时%.0fms', len(items), t)
         return jsonify({'items': items})
 
+    # 回退：DB 为空时读文件
     files = _list_conversation_files()
     if date:
         files = [f for f in files if os.path.basename(os.path.dirname(f)) == date]
-
-    # 如果要做 q 过滤，先多读一点，避免过滤后数量不足
     read_count = max(limit * 5, limit)
     files = files[:read_count]
-
     items: list[dict[str, Any]] = []
     for fp in files:
         try:
@@ -786,20 +794,17 @@ def logs_list():
                 doc = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
-
         conversation_id = doc.get('conversation_id') or os.path.splitext(os.path.basename(fp))[0]
         route_name = doc.get('route', '')
         last_model = doc.get('last_client_model', '')
         updated_at = doc.get('updated_at', '')
         created_at = doc.get('created_at', '')
         turn_count = int(doc.get('turn_count', 0) or 0)
-
         if q:
             q_lower = q.lower()
             hay = ' '.join([str(conversation_id), str(route_name), str(last_model)]).lower()
             if q_lower not in hay:
                 continue
-
         items.append({
             'conversation_id': conversation_id,
             'date': os.path.basename(os.path.dirname(fp)),
@@ -811,22 +816,19 @@ def logs_list():
             'turn_count': turn_count,
             'note': (notes.get(conversation_id) or {}).get('note', ''),
         })
-
         if len(items) >= limit:
             break
-
     t = (_time.time() - _start) * 1000
-    logger.info('[性能] GET /api/admin/logs glob分支 limit=%d q=%s 返回%d条 耗时%.0fms', limit, q or '-', len(items), t)
+    logger.info('[性能] GET /api/admin/logs 文件回退 返回%d条 耗时%.0fms', len(items), t)
     return jsonify({'items': items})
 
 
 @bp.route('/api/admin/logs/<path:conversation_id>', methods=['GET'])
 def logs_detail(conversation_id: str):
-    """查看某个会话日志的完整内容。
+    """查看某个会话日志的完整内容（优先数据库）。
 
     支持参数:
-      ?date=YYYY-MM-DD   指定日期
-      ?turn=N            只返回指定 turn（索引从 0 开始），默认返回全部
+      ?turn=N            只返回指定 turn（索引从 0 开始），默认返回第一个
       ?fields=summary    只返回元数据 + turn 摘要，不返回消息体和流式事件
     """
     import time as _time
@@ -835,34 +837,48 @@ def logs_detail(conversation_id: str):
     if err:
         return err
 
-    date = (request.args.get('date') or '').strip() or None
     turn_idx = request.args.get('turn', '').strip()
-    turn_idx = int(turn_idx) if turn_idx.isdigit() else None
-    fields = (request.args.get('fields') or '').strip().lower()
+    turn_idx = int(turn_idx) if turn_idx.lstrip('-').isdigit() else None
 
-    # 若指定了 ?turn=N，优先读取独立 turn 文件（避免解析完整的大 JSON）
+    # 优先从数据库读取
+    try:
+        detail = conversation_store.get_turn_detail(
+            conversation_id, turn_index=turn_idx if turn_idx is not None else 0,
+        )
+    except Exception:
+        detail = None
+
+    if detail:
+        notes = _load_log_notes()
+        note_entry = notes.get(conversation_id) or {}
+        result = {
+            'conversation': detail,
+            'note': note_entry.get('note', ''),
+        }
+        total_ms = (_time.time() - _start) * 1000
+        logger.info('[性能] GET /api/admin/logs/%s?turn=%s DB 总turns=%d 耗时%.0fms',
+                    conversation_id, turn_idx if turn_idx is not None else 0,
+                    detail.get('_total_turns', 0), total_ms)
+        return jsonify(result)
+
+    # 回退：DB 无数据，走文件路径
+    date = (request.args.get('date') or '').strip() or None
     if turn_idx is not None and date:
         turn_fp = os.path.join(_LOG_DIR, date, f'{conversation_id}_turn{turn_idx}.json')
         if os.path.isfile(turn_fp):
             try:
                 with open(turn_fp, 'r', encoding='utf-8') as f:
                     raw = f.read()
-                read_ms = (_time.time() - _start) * 1000
                 doc = json.loads(raw)
-                parse_ms = (_time.time() - _start) * 1000 - read_ms
                 notes = _load_log_notes()
                 note_entry = notes.get(conversation_id) or {}
-                result = {
-                    'conversation': doc,
-                    'note': note_entry.get('note', ''),
-                }
+                result = {'conversation': doc, 'note': note_entry.get('note', '')}
                 total_ms = (_time.time() - _start) * 1000
-                fsize_kb = len(raw) / 1024
-                logger.info('[性能] GET /api/admin/logs/%s?turn=%d turn文件 大小=%.0fKB 读取=%.0fms 解析=%.0fms 总耗时=%.0fms',
-                            conversation_id, turn_idx, fsize_kb, read_ms, parse_ms, total_ms)
+                logger.info('[性能] GET /api/admin/logs/%s?turn=%d turn文件回退 大小=%.0fKB 耗时%.0fms',
+                            conversation_id, turn_idx, len(raw) / 1024, total_ms)
                 return jsonify(result)
             except (OSError, json.JSONDecodeError):
-                pass  # 回退到读取完整文件
+                pass
 
     fp = _find_conversation_file(conversation_id, date)
     if not fp:
@@ -871,73 +887,47 @@ def logs_detail(conversation_id: str):
     try:
         with open(fp, 'r', encoding='utf-8') as f:
             raw = f.read()
-        read_ms = (_time.time() - _start) * 1000
         doc = json.loads(raw)
-        parse_ms = (_time.time() - _start) * 1000 - read_ms
     except (OSError, json.JSONDecodeError):
         return jsonify({'error': '日志读取失败'}), 500
 
-    # 按需裁剪：仅返回指定 turn
     if turn_idx is not None:
         all_turns = doc.get('turns', [])
         if 0 <= turn_idx < len(all_turns):
-            turn = all_turns[turn_idx]
-            doc['turns'] = [turn]
-            doc['turn_count'] = len(all_turns)
+            doc['turns'] = [all_turns[turn_idx]]
             doc['_current_turn'] = turn_idx
             doc['_total_turns'] = len(all_turns)
         else:
             return jsonify({'error': 'turn 索引超出范围', 'total_turns': len(all_turns)}), 400
 
-    # summary 模式：移除消息体和流式事件中的详细数据
-    if fields == 'summary':
-        for turn in doc.get('turns', []):
-            cr = turn.get('client_request', {})
-            if isinstance(cr, dict):
-                msgs = cr.get('messages', [])
-                cr['messages'] = [{'role': m.get('role', '?'),
-                                   '_content_len': len(json.dumps(m.get('content', ''), ensure_ascii=False))}
-                                  for m in msgs]
-            turn.pop('upstream_request', None)
-            turn.pop('upstream_response', None)
-            st = turn.get('stream_trace', {})
-            if isinstance(st, dict):
-                st.pop('upstream_events', None)
-                st.pop('client_events', None)
-
     notes = _load_log_notes()
     note_entry = notes.get(conversation_id) or {}
-    result = {
-        'conversation': doc,
-        'note': note_entry.get('note', ''),
-    }
+    result = {'conversation': doc, 'note': note_entry.get('note', '')}
     total_ms = (_time.time() - _start) * 1000
-    fsize_kb = len(raw) / 1024
-    all_turn_count = doc.get('_total_turns')
-    if all_turn_count is None:
-        all_turn_count = len(doc.get('turns', []))
-    actual_turns = len(doc.get('turns', []))
-    logger.info('[性能] GET /api/admin/logs/%s 文件大小=%.0fKB 总turns=%d 返回turns=%d 读取=%.0fms 解析=%.0fms 总耗时=%.0fms',
-                conversation_id, fsize_kb, all_turn_count, actual_turns, read_ms, parse_ms, total_ms)
+    logger.info('[性能] GET /api/admin/logs/%s 文件回退 大小=%.0fKB 耗时%.0fms',
+                conversation_id, len(raw) / 1024, total_ms)
     return jsonify(result)
 
 
 @bp.route('/api/admin/logs/<path:conversation_id>', methods=['DELETE'])
 def logs_delete(conversation_id: str):
-    """删除某个会话日志文件。"""
+    """删除某个会话日志（数据库 + 文件）。"""
     err = _check_auth()
     if err:
         return err
 
+    try:
+        conversation_store.delete_conversation(conversation_id)
+    except Exception:
+        pass
+
     date = (request.args.get('date') or '').strip() or None
     fp = _find_conversation_file(conversation_id, date)
-    if not fp:
-        return jsonify({'ok': True})
-
-    try:
-        os.remove(fp)
-    except OSError as e:
-        return jsonify({'error': {'message': f'delete failed: {e}', 'type': 'delete_error'}}), 500
+    if fp:
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
 
     conv_idx.delete_conversation(conversation_id)
 
@@ -947,6 +937,23 @@ def logs_delete(conversation_id: str):
         _save_log_notes(notes)
 
     return jsonify({'ok': True})
+
+
+@bp.route('/api/admin/logs/search', methods=['GET'])
+def logs_search():
+    """全文搜索消息内容。"""
+    err = _check_auth()
+    if err:
+        return err
+    q = (request.args.get('q') or '').strip()
+    if not q or len(q) < 2:
+        return jsonify({'error': '搜索词至少 2 个字符'}), 400
+    try:
+        results = conversation_store.search_messages(q, limit=50)
+        return jsonify({'items': results, 'q': q})
+    except Exception as e:
+        logger.warning('搜索失败: %s', e)
+        return jsonify({'error': '搜索暂时不可用'}), 500
 
 
 @bp.route('/api/admin/logs/clear', methods=['POST'])
@@ -971,6 +978,10 @@ def logs_clear():
                     ensure_ascii=False,
                 ) + '\n'
                 conv_idx.clear_all_rows()
+            try:
+                conversation_store.clear_all()
+            except Exception:
+                pass
                 return
 
             files = glob.glob(os.path.join(_LOG_DIR, '*', '*.json'))
@@ -1012,6 +1023,10 @@ def logs_clear():
                 ensure_ascii=False,
             ) + '\n'
             conv_idx.clear_all_rows()
+            try:
+                conversation_store.clear_all()
+            except Exception:
+                pass
         except Exception as e:
             logger.exception('清空历史日志异常')
             yield json.dumps({'phase': 'error', 'message': str(e)}, ensure_ascii=False) + '\n'

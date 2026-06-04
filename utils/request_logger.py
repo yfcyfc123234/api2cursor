@@ -22,6 +22,7 @@ from settings import DATA_DIR
 import settings
 from utils.http import gen_id
 from utils import conversation_index
+from utils import conversation_store
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +382,12 @@ def _write_turn(turn: dict[str, Any]) -> None:
             }
             with open(turn_filepath, 'w', encoding='utf-8') as f:
                 json.dump(turn_doc, f, ensure_ascii=False, indent=2, default=str)
+
+            # 同时写入 SQLite 数据库
+            try:
+                conversation_store.insert_turn(turn)
+            except Exception as e:
+                logger.warning('写入数据库失败: %s', e)
         except OSError as e:
             logger.warning('写入对话日志失败: %s', e)
         except json.JSONDecodeError as e:
