@@ -329,10 +329,13 @@ function renderTurnBar() {
 
 function renderConvMeta(turn) {
   var html = '';
-  html += '<span>模型: <strong>' + escHtml(turn.client_model || '?') + '</strong></span>';
+  html += '<span>客户端: <strong>' + escHtml(turn.client_type || '?') + '</strong></span>';
+  var cr = turn.client_request || {};
+  if (cr.model) html += '<span>请求模型: <strong>' + escHtml(cr.model) + '</strong></span>';
   html += '<span>后端: <strong>' + escHtml(turn.backend || '?') + '</strong></span>';
   html += '<span>上游: <strong>' + escHtml(turn.upstream_model || '?') + '</strong></span>';
   html += '<span>流式: <strong>' + (turn.stream ? '是' : '否') + '</strong></span>';
+  if (cr.user) html += '<span>用户: <strong>' + escHtml(cr.user.substring(0, 40)) + '</strong></span>';
   if (turn.usage) {
     html += '<span>Token: <strong>' +
       (turn.usage.prompt_tokens || 0) + ' in / ' +
@@ -343,6 +346,15 @@ function renderConvMeta(turn) {
   }
   if (turn.error) {
     html += '<span class="meta-err">⚠ 有错误</span>';
+  }
+  // 客户端 headers（可折叠）
+  if (turn.client_headers) {
+    html += '<details style="font-size:11px"><summary style="cursor:pointer;color:var(--muted)">📋 请求头</summary>';
+    html += '<pre style="font-size:10px;margin:4px 0;white-space:pre-wrap">';
+    for (var k in turn.client_headers) {
+      html += escHtml(k) + ': ' + escHtml(String(turn.client_headers[k])) + '\n';
+    }
+    html += '</pre></details>';
   }
   document.getElementById('convMeta').innerHTML = html;
 }

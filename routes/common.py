@@ -248,3 +248,61 @@ def apply_header_modifications(headers: dict[str, str], modifications: dict[str,
             headers[key] = str(value)
     logger.info('已应用 header_modifications: %s', list(modifications.keys()))
     return headers
+
+
+def forward_with_patches(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    upstream_model: str = '',
+    client_type: str = '',
+    stream: bool = False,
+    max_retries: int = 2,
+):
+    """发送请求并自动打补丁重试。
+
+    当上游返回错误且 error_patcher 有匹配补丁时，自动修复并重试。
+    返回 (response, error, patch_logs)。
+    """
+    from utils.http import forward_request
+    from utils.error_patcher import match as match_patches, apply as apply_patch
+
+    patches_applied = []
+    current_payload = payload
+
+    for attempt in range(max_retries + 1):
+        resp, err = forward_request(url, headers, current_payload, stream=stream)
+
+        if not err:
+            if patches_applied:
+                logger.info('[补丁] 重试成功 (尝试 %d 次, 补丁: %s)',
+                            attempt, ', '.join(p['name'] for p in patches_applied))
+            return resp, None, patches_applied
+
+        # 最后一次尝试不重试
+        if attempt >= max_retries:
+            break
+
+        # 尝试匹配补丁
+        error_str = str(err)
+        patches = match_patches(error_str, upstream_model, client_type)
+        if not patches:
+            break
+
+        for patch in patches:
+            if not patch.get('retryable', True):
+                continue
+            logger.warning('[补丁] 匹配到错误: %s → 应用补丁: %s',
+                           error_str[:150], patch['description'])
+            try:
+                current_payload = apply_patch(current_payload, patch, error_str)
+                patches_applied.append(patch)
+            except Exception as e:
+                logger.warning('[补丁] 应用失败: %s', e)
+
+    # 所有重试都失败
+    if patches_applied:
+        logger.warning('[补丁] 所有重试失败 (%d 次), 补丁: %s',
+                       len(patches_applied),
+                       ', '.join(p['name'] for p in patches_applied))
+    return None, err, patches_applied

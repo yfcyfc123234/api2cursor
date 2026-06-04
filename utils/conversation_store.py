@@ -26,7 +26,7 @@ from utils.http import gen_id
 logger = logging.getLogger(__name__)
 
 _DB_LOCK = threading.Lock()
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _STORE_PATH = os.path.join(DATA_DIR, 'conversations.db')
 
@@ -76,6 +76,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             stream_summary TEXT,
             client_response TEXT,
             upstream_response TEXT,
+            client_user TEXT NOT NULL DEFAULT '',
+            client_stream_options TEXT,
+            client_tools_json TEXT,
+            client_type TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (conversation_id) REFERENCES conversations(id)
         );
 
@@ -95,6 +99,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             turn_id TEXT PRIMARY KEY,
             headers TEXT,
             body TEXT,
+            FOREIGN KEY (turn_id) REFERENCES turns(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS client_requests (
+            turn_id TEXT PRIMARY KEY,
+            model TEXT NOT NULL DEFAULT '',
+            user_field TEXT,
+            stream_options TEXT,
+            tools_json TEXT,
+            headers TEXT,
             FOREIGN KEY (turn_id) REFERENCES turns(id)
         );
 
@@ -118,6 +132,24 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     """)
     cur = conn.execute('PRAGMA user_version')
     ver = cur.fetchone()[0]
+    if ver < 2:
+        # v1 → v2: 新增客户端相关字段
+        try:
+            conn.execute("ALTER TABLE turns ADD COLUMN client_user TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE turns ADD COLUMN client_stream_options TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE turns ADD COLUMN client_tools_json TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE turns ADD COLUMN client_type TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
     if ver < _SCHEMA_VERSION:
         conn.execute(f'PRAGMA user_version = {_SCHEMA_VERSION}')
     conn.commit()
@@ -180,13 +212,21 @@ def insert_turn(turn: dict[str, Any]) -> None:
             )
 
             # 2. upsert turn
+            # 提取客户端信息
+            cr_data = turn.get('client_request') or {}
+            client_user = str(cr_data.get('user', '') or '')
+            client_stream_opts = _safe_json(cr_data.get('stream_options'))
+            client_tools = _safe_json(cr_data.get('tools'))
+            client_type = _detect_client_type(turn.get('request_headers') or {})
+
             conn.execute(
                 """INSERT OR REPLACE INTO turns
                    (id, conversation_id, turn_index, route, client_model, backend,
                     upstream_model, target_url, stream, started_at, updated_at,
                     duration_ms, prompt_tokens, completion_tokens, total_tokens,
-                    error_stage, error_message, stream_summary, client_response, upstream_response)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    error_stage, error_message, stream_summary, client_response, upstream_response,
+                    client_user, client_stream_options, client_tools_json, client_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     turn_id, conv_id,
                     _compute_turn_index(conn, conv_id, turn_id),
@@ -199,6 +239,7 @@ def insert_turn(turn: dict[str, Any]) -> None:
                     usage.get('total_tokens', 0),
                     error_stage, error_message,
                     stream_summary, client_response, upstream_response,
+                    client_user, client_stream_opts, client_tools, client_type,
                 ),
             )
 
@@ -229,7 +270,20 @@ def insert_turn(turn: dict[str, Any]) -> None:
                      tool_calls_json, msg.get('tool_call_id', '')),
                 )
 
-            # 5. 写入上游请求
+            # 5. 写入客户端请求元数据
+            req_headers = turn.get('request_headers') or {}
+            conn.execute(
+                """INSERT OR REPLACE INTO client_requests
+                   (turn_id, model, user_field, stream_options, tools_json, headers)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (turn_id, cr_data.get('model', ''),
+                 client_user,
+                 client_stream_opts,
+                 client_tools,
+                 _safe_json(req_headers)),
+            )
+
+            # 6. 写入上游请求
             ur = turn.get('upstream_request') or {}
             if ur:
                 conn.execute(
@@ -276,6 +330,25 @@ def _compute_turn_index(conn: sqlite3.Connection, conv_id: str, turn_id: str) ->
     if max_idx is not None:
         return max_idx + 1
     return 0
+
+
+def _detect_client_type(headers: dict[str, Any]) -> str:
+    """从请求头识别客户端类型。"""
+    ua = str(headers.get('User-Agent', '') or headers.get('user-agent', ''))
+    if not ua:
+        return 'unknown'
+    ua_lower = ua.lower()
+    if 'cursor' in ua_lower:
+        return 'cursor'
+    if 'windsurf' in ua_lower:
+        return 'windsurf'
+    if 'continue' in ua_lower:
+        return 'continue'
+    if 'cline' in ua_lower:
+        return 'cline'
+    if 'copilot' in ua_lower or 'github' in ua_lower:
+        return 'github-copilot'
+    return 'other'
 
 
 def _safe_json(val: Any) -> str | None:
@@ -395,6 +468,11 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                     msg['tool_calls'] = tc
                 messages.append(msg)
 
+            # 客户端请求元数据
+            clr = conn.execute(
+                "SELECT * FROM client_requests WHERE turn_id = ?", (turn_row['id'],)
+            ).fetchone()
+
             # 上游请求
             ur = conn.execute(
                 "SELECT * FROM upstream_requests WHERE turn_id = ?", (turn_row['id'],)
@@ -470,7 +548,15 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 },
                 'error': {'stage': turn['error_stage'], 'message': turn['error_message']}
                           if turn['error_stage'] or turn['error_message'] else None,
-                'client_request': {'messages': messages},
+                'client_request': {
+                    'messages': messages,
+                    'model': clr['model'] if clr else '',
+                    'user': clr['user_field'] if clr else '',
+                    'stream_options': _parse_json(clr['stream_options']) if clr else None,
+                    'tools': _parse_json(clr['tools_json']) if clr else None,
+                },
+                'client_headers': _parse_json(clr['headers']) if clr else None,
+                'client_type': turn.get('client_type', ''),
                 'upstream_request': None,  # 按需加载（对比视图时再取）
                 'stream_trace': {
                     'summary': _parse_json(turn['stream_summary']) or {},
