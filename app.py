@@ -32,6 +32,12 @@ def create_app():
 
     # ─── JSON 错误处理器 ──────────────────────────
 
+    @app.route('/')
+    def index():
+        """根路径重定向到会话回放页面。"""
+        from flask import redirect
+        return redirect('/admin/conversations', code=302)
+
     @app.errorhandler(404)
     def not_found(e):
         """将未匹配到的路径统一转换为 JSON 404 响应。"""
@@ -60,7 +66,7 @@ def create_app():
             return
 
         # 无需鉴权的路径
-        skip = ('/health', '/admin', '/static/', '/api/admin')
+        skip = ('/', '/health', '/admin', '/static/', '/api/admin')
         if any(request.path == p or request.path.startswith(p) for p in skip):
             return
 
