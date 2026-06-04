@@ -364,6 +364,23 @@ def _write_turn(turn: dict[str, Any]) -> None:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(doc, f, ensure_ascii=False, indent=2, default=str)
             conversation_index.upsert_from_document(doc, filepath)
+
+            # 同时写入独立的 turn 文件，方便按需读取
+            turn_idx = len(turns) - 1
+            turn_filepath = os.path.join(day_dir, f'{conversation_id}_turn{turn_idx}.json')
+            turn_doc = {
+                'conversation_id': conversation_id,
+                'route': turn.get('route', ''),
+                'created_at': doc['created_at'],
+                'updated_at': turn['updated_at'],
+                '_current_turn': turn_idx,
+                '_total_turns': len(turns),
+                'last_client_model': turn.get('client_model', ''),
+                'last_backend': turn.get('backend', ''),
+                'turns': [turn],
+            }
+            with open(turn_filepath, 'w', encoding='utf-8') as f:
+                json.dump(turn_doc, f, ensure_ascii=False, indent=2, default=str)
         except OSError as e:
             logger.warning('写入对话日志失败: %s', e)
         except json.JSONDecodeError as e:

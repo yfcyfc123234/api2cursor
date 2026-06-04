@@ -840,6 +840,30 @@ def logs_detail(conversation_id: str):
     turn_idx = int(turn_idx) if turn_idx.isdigit() else None
     fields = (request.args.get('fields') or '').strip().lower()
 
+    # 若指定了 ?turn=N，优先读取独立 turn 文件（避免解析完整的大 JSON）
+    if turn_idx is not None and date:
+        turn_fp = os.path.join(_LOG_DIR, date, f'{conversation_id}_turn{turn_idx}.json')
+        if os.path.isfile(turn_fp):
+            try:
+                with open(turn_fp, 'r', encoding='utf-8') as f:
+                    raw = f.read()
+                read_ms = (_time.time() - _start) * 1000
+                doc = json.loads(raw)
+                parse_ms = (_time.time() - _start) * 1000 - read_ms
+                notes = _load_log_notes()
+                note_entry = notes.get(conversation_id) or {}
+                result = {
+                    'conversation': doc,
+                    'note': note_entry.get('note', ''),
+                }
+                total_ms = (_time.time() - _start) * 1000
+                fsize_kb = len(raw) / 1024
+                logger.info('[性能] GET /api/admin/logs/%s?turn=%d turn文件 大小=%.0fKB 读取=%.0fms 解析=%.0fms 总耗时=%.0fms',
+                            conversation_id, turn_idx, fsize_kb, read_ms, parse_ms, total_ms)
+                return jsonify(result)
+            except (OSError, json.JSONDecodeError):
+                pass  # 回退到读取完整文件
+
     fp = _find_conversation_file(conversation_id, date)
     if not fp:
         return jsonify({'error': '日志不存在'}), 404
@@ -889,7 +913,9 @@ def logs_detail(conversation_id: str):
     }
     total_ms = (_time.time() - _start) * 1000
     fsize_kb = len(raw) / 1024
-    all_turn_count = len(doc.get('_total_turns', doc.get('turns', [])))
+    all_turn_count = doc.get('_total_turns')
+    if all_turn_count is None:
+        all_turn_count = len(doc.get('turns', []))
     actual_turns = len(doc.get('turns', []))
     logger.info('[性能] GET /api/admin/logs/%s 文件大小=%.0fKB 总turns=%d 返回turns=%d 读取=%.0fms 解析=%.0fms 总耗时=%.0fms',
                 conversation_id, fsize_kb, all_turn_count, actual_turns, read_ms, parse_ms, total_ms)
