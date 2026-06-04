@@ -66,16 +66,25 @@ function doLogout() {
   document.getElementById('login').style.display = 'flex';
 }
 
-(function () {
+function autoLogin() {
+  // 1. sessionStorage 缓存
   var saved = sessionStorage.getItem('_ak');
+  // 2. URL 参数 ?key=xxx
+  var urlKey = new URLSearchParams(window.location.search).get('key');
+  if (urlKey) saved = urlKey;
   if (saved) {
     authKey = saved;
+    sessionStorage.setItem('_ak', saved);
     document.getElementById('login').style.display = 'none';
     document.getElementById('dashboard').style.display = 'block';
     loadConversationList();
     startLiveSSE();
+    return true;
   }
-})();
+  return false;
+}
+
+autoLogin();
 
 /* ===== 会话列表 ===== */
 var CONVERSATIONS = [];
