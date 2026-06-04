@@ -818,20 +818,28 @@ function copyConversation() {
   }
 
   var text = lines.join('\n');
-  navigator.clipboard.writeText(text).then(function() {
-    toast('已复制 ' + lines.length + ' 行对话信息');
-  }).catch(function() {
-    // Fallback: 选中文本让用户手动复制
+
+  // 使用 textarea + execCommand（兼容 HTTP 和所有浏览器）
+  try {
     var ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
     ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
     document.body.appendChild(ta);
+    ta.focus();
     ta.select();
-    document.execCommand('copy');
+    var ok = document.execCommand('copy');
     document.body.removeChild(ta);
-    toast('已复制对话信息');
-  });
+    if (ok) {
+      toast('已复制 ' + lines.length + ' 行对话信息');
+    } else {
+      toast('复制失败，请手动选择文本', false);
+    }
+  } catch(e) {
+    console.error('复制失败:', e);
+    toast('复制失败: ' + e.message, false);
+  }
 }
 
 /* ===== 辅助 ===== */
