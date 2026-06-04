@@ -354,12 +354,17 @@ function renderConvMeta(turn) {
 function renderMessages(turn) {
   var t0 = performance.now();
   var chatEl = document.getElementById('chatMessages');
+  try {
   var html = '<div class="chat-messages">';
 
   // 1. 渲染 client_request.messages
   var msgs = (turn.client_request && turn.client_request.messages) || [];
   msgs.forEach(function (msg, i) {
-    html += renderMessageBubble(msg, i);
+    try {
+      html += renderMessageBubble(msg, i);
+    } catch(e) {
+      console.error('[前端] renderMessageBubble msg[' + i + '] 出错:', e, msg);
+    }
   });
 
   // 2. 如果有非流式响应，渲染
@@ -375,12 +380,15 @@ function renderMessages(turn) {
   // 4. 流式数据占位（将由播放器填充）
   if (turn.stream && turn.stream_trace && turn.stream_trace.client_events &&
       turn.stream_trace.client_events.length > 0) {
+    console.log('[前端] 创建流式占位, client_events=%d条', turn.stream_trace.client_events.length);
     html += '<div id="streamPlaceholder" class="chat-msg assistant">';
     html += '<div class="chat-avatar">🤖</div>';
     html += '<div class="chat-bubble" id="streamContent" style="min-height:20px">';
     html += '<span class="cursor-blink" id="streamCursor"></span>';
     html += '</div>';
     html += '</div>';
+  } else {
+    console.log('[前端] 无流式数据 stream=%s hasTrace=%s', turn.stream, !!turn.stream_trace);
   }
 
   // 5. 流式摘要
@@ -404,9 +412,11 @@ function renderMessages(turn) {
 
   // 高亮代码块
   if (typeof hljs !== 'undefined') {
-    chatEl.querySelectorAll('pre code').forEach(function (block) {
-      hljs.highlightElement(block);
-    });
+    try {
+      chatEl.querySelectorAll('pre code').forEach(function (block) {
+        hljs.highlightElement(block);
+      });
+    } catch(e) {}
   }
 
   // 绑定工具调用的点击展开
@@ -422,12 +432,14 @@ function renderMessages(turn) {
     });
   });
 
-  var msgs = (turn.client_request && turn.client_request.messages) || [];
   console.log('[前端] 渲染消息 %d 条 (含%s流式), 耗时 %.0f ms',
     msgs.length,
     (turn.stream && turn.stream_trace && turn.stream_trace.client_events &&
      turn.stream_trace.client_events.length > 0) ? '' : '无',
     performance.now() - t0);
+  } catch(e) {
+    console.error('[前端] renderMessages 崩溃:', e);
+  }
 }
 
 function renderMessageBubble(msg, idx) {
@@ -601,11 +613,14 @@ function setupPlayback(turn) {
   var bar = document.getElementById('playbackBar');
   var trace = turn.stream_trace;
 
+  console.log('[前端] setupPlayback stream=%s hasTrace=%s events=%d',
+    turn.stream, !!trace, trace ? (trace.client_events ? trace.client_events.length : 0) : 0);
+
   if (!turn.stream || !trace || !trace.client_events || !trace.client_events.length) {
     bar.style.display = 'none';
-    // 隐藏占位光标
     var cursor = document.getElementById('streamCursor');
     if (cursor) cursor.style.display = 'none';
+    console.log('[前端] setupPlayback: 播放条隐藏');
     return;
   }
 
@@ -614,16 +629,24 @@ function setupPlayback(turn) {
   document.getElementById('playbackFill').style.width = '0%';
   document.getElementById('playbackText').textContent = '0 / ' + trace.client_events.length;
   updatePlayButton();
+  console.log('[前端] setupPlayback: 播放条显示, 就绪');
 }
 
 function startPlayback() {
+  console.log('[前端] startPlayback 被调用');
   var turn = currentDoc.turns[currentTurnIdx];
+  if (!turn) { console.error('[前端] startPlayback: turn 不存在'); return; }
   var trace = turn.stream_trace;
-  if (!trace || !trace.client_events || !trace.client_events.length) return;
+  if (!trace || !trace.client_events || !trace.client_events.length) {
+    console.log('[前端] startPlayback: 无流式数据 trace=%s events=%d',
+      !!trace, trace ? trace.client_events.length : 0);
+    return;
+  }
 
   isPlaying = true;
   updatePlayButton();
-  document.getElementById('streamCursor').style.display = 'inline-block';
+  var cursor = document.getElementById('streamCursor');
+  if (cursor) cursor.style.display = 'inline-block';
   console.log('[前端] 开始流式回放 %d 个事件, 速度=%dx', trace.client_events.length, playbackSpeed);
   playbackStep();
 }
@@ -631,51 +654,58 @@ function startPlayback() {
 function playbackStep() {
   if (!isPlaying) return;
 
+  try {
   var turn = currentDoc.turns[currentTurnIdx];
   var trace = turn.stream_trace;
   var events = trace.client_events;
 
   if (playbackIdx >= events.length) {
     stopPlayback();
-    document.getElementById('streamCursor').style.display = 'none';
+    var cursor = document.getElementById('streamCursor');
+    if (cursor) cursor.style.display = 'none';
+    console.log('[前端] 回放完成 %d/%d', playbackIdx, events.length);
     return;
   }
 
   var event = events[playbackIdx];
-  appendStreamChunk(event);
+  if (event) {
+    appendStreamChunk(event);
+  }
   playbackIdx++;
 
   // 更新进度条
-  var pct = (playbackIdx / events.length) * 100;
-  document.getElementById('playbackFill').style.width = pct + '%';
+  document.getElementById('playbackFill').style.width = (playbackIdx / events.length * 100) + '%';
   document.getElementById('playbackText').textContent = playbackIdx + ' / ' + events.length;
 
   // 自动滚动
-  var viewport = document.getElementById('chatViewport');
-  viewport.scrollTop = viewport.scrollHeight;
+  document.getElementById('chatViewport').scrollTop = document.getElementById('chatViewport').scrollHeight;
 
   // 根据速度安排下一步
   if (playbackSpeed === 0) {
-    // 瞬间完成：使用 requestAnimationFrame 快速处理
     if (playbackIdx < events.length) {
       requestAnimationFrame(playbackStep);
     } else {
       stopPlayback();
-      document.getElementById('streamCursor').style.display = 'none';
+      var c = document.getElementById('streamCursor');
+      if (c) c.style.display = 'none';
     }
   } else {
-    var delay = Math.round(50 / playbackSpeed);
-    playbackTimer = setTimeout(playbackStep, delay);
+    playbackTimer = setTimeout(playbackStep, Math.round(40 / playbackSpeed));
+  }
+  } catch(e) {
+    console.error('[前端] playbackStep 崩溃:', e);
+    stopPlayback();
   }
 }
 
 function appendStreamChunk(event) {
+  try {
   var container = document.getElementById('streamContent');
-  if (!container) return;
+  if (!container) { console.log('[前端] appendStreamChunk: streamContent 不存在'); return; }
 
-  // 移除光标再追加
   var cursor = document.getElementById('streamCursor');
   var data = (event && event.data) ? event.data : event;
+  if (!data) return;  // 跳过 null/undefined data
 
   // 解析 chunk 数据
   var chunk;
@@ -691,28 +721,29 @@ function appendStreamChunk(event) {
   var text = '';
 
   if (delta.reasoning_content) {
-    text = '<span style="color:var(--muted);font-style:italic">' +
+    text += '<span style="color:var(--muted);font-style:italic">' +
       escHtml(delta.reasoning_content) + '</span>';
   }
   if (delta.content) {
-    text = renderMarkdown(delta.content);
+    text += renderMarkdown(delta.content);
   }
   if (delta.tool_calls) {
     delta.tool_calls.forEach(function (tc) {
       var func = tc.function || {};
       var name = func.name || '?';
-      var args = func.arguments || '';
       text += '<div class="tool-call-card" style="margin:4px 0">';
       text += '<div class="tool-call-header">🔧 ' + escHtml(name);
       text += '</div></div>';
     });
   }
 
-  if (text) {
-    // 用临时 span 包裹，方便移除旧光标
+  if (text && cursor) {
     var span = document.createElement('span');
     span.innerHTML = text;
     container.insertBefore(span, cursor);
+  }
+  } catch(e) {
+    console.error('[前端] appendStreamChunk 崩溃 event#', playbackIdx, e);
   }
 }
 
@@ -723,23 +754,30 @@ function stopPlayback() {
     playbackTimer = null;
   }
   updatePlayButton();
+  console.log('[前端] 回放已停止');
 }
 
 function togglePlay() {
+  console.log('[前端] togglePlay 被点击 isPlaying=%s', isPlaying);
+  try {
   if (isPlaying) {
     stopPlayback();
   } else {
-    // 如果已经播完，从头开始
     var turn = currentDoc.turns[currentTurnIdx];
+    if (!turn) { console.error('[前端] togglePlay: turn 不存在'); return; }
     var trace = turn.stream_trace;
     if (trace && trace.client_events && playbackIdx >= trace.client_events.length) {
+      console.log('[前端] 重置回放到开头');
       playbackIdx = 0;
-      document.getElementById('streamContent').innerHTML =
-        '<span class="cursor-blink" id="streamCursor"></span>';
+      var sc = document.getElementById('streamContent');
+      if (sc) sc.innerHTML = '<span class="cursor-blink" id="streamCursor"></span>';
       document.getElementById('playbackFill').style.width = '0%';
       document.getElementById('playbackText').textContent = '0 / ' + trace.client_events.length;
     }
     startPlayback();
+  }
+  } catch(e) {
+    console.error('[前端] togglePlay 崩溃:', e);
   }
 }
 
