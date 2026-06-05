@@ -53,6 +53,32 @@ def create_app():
         """将未捕获的服务端异常统一包装为 JSON 500 响应。"""
         return jsonify({'error': {'message': '服务器内部错误', 'type': 'server_error'}}), 500
 
+    # ─── Web 管理面板登录 ─────────────────────
+
+    @app.route('/auth/login')
+    def web_login():
+        """Web 面板专用登录：GET /auth/login?token=xxx
+
+        验证成功后设置 session cookie 并跳转到管理面板。
+        Token 只出现在这一次请求中，后续走 cookie 验证，容器重启不丢失。
+        """
+        from flask import redirect, request as req
+        import hashlib
+        token = (req.args.get('token') or '').strip()
+        web_token = Config.WEB_ACCESS_TOKEN or Config.ACCESS_API_KEY
+        if token and web_token and token == web_token:
+            resp = redirect('/admin/conversations', code=302)
+            cookie_val = hashlib.sha256(
+                (web_token + 'api2cursor_web_salt').encode()
+            ).hexdigest()
+            resp.set_cookie(
+                'web_session', cookie_val,
+                max_age=60 * 60 * 24 * 30,
+                httponly=True, samesite='Lax',
+            )
+            return resp
+        return '<h3>Token 无效</h3><p>请联系管理员获取正确的访问链接</p>', 401
+
     # ─── 全局鉴权中间件 ──────────────────────────
 
     @app.before_request
@@ -65,8 +91,23 @@ def create_app():
         if not Config.ACCESS_API_KEY:
             return
 
+        # 检查 Web session cookie（管理面板专用，无需 API key）
+        import hashlib
+        web_token = Config.WEB_ACCESS_TOKEN or Config.ACCESS_API_KEY
+        expected_cookie = hashlib.sha256(
+            (web_token + 'api2cursor_web_salt').encode()
+        ).hexdigest() if web_token else ''
+        if request.path.startswith('/admin') or request.path.startswith('/api/admin'):
+            cookie = request.cookies.get('web_session', '')
+            if cookie and expected_cookie and cookie == expected_cookie:
+                return  # Cookie 有效，放行
+            # 也允许 ?key=xxx 方式（兼容旧用法）
+            qk = request.args.get('key', '')
+            if qk and qk == web_token:
+                return
+
         # 无需鉴权的路径
-        skip = ('/', '/health', '/admin', '/static/', '/api/admin')
+        skip = ('/', '/auth/', '/health', '/admin', '/static/', '/api/admin')
         if any(request.path == p or request.path.startswith(p) for p in skip):
             return
 

@@ -40,5 +40,9 @@ class Config:
     _conv_idx_dis = os.getenv('CONVERSATION_INDEX_DISABLED', '').strip().lower()
     CONVERSATION_INDEX_DISABLED = _conv_idx_dis in ('1', 'true', 'yes', 'on')
 
+    # Web 管理面板独立登录 Token（与 API 密钥分离，可安全放入链接）
+    # 留空则回退到 ACCESS_API_KEY
+    WEB_ACCESS_TOKEN = os.getenv('WEB_ACCESS_TOKEN', '').strip()
+
     # 模型定价 JSON（用量费用估算），空则使用项目根目录 model_pricing.json
     MODEL_PRICING_PATH = os.getenv('MODEL_PRICING_PATH', '').strip()
