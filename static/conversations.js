@@ -244,13 +244,16 @@ async function batchCopy() {
 
 async function batchDelete() {
   var ids = Object.keys(selectedConvIds);
+  console.log('[前端] batchDelete 选中 %d 条, ids=%s', ids.length, ids.join(','));
   if (!ids.length) return;
   if (!confirm('确认删除 ' + ids.length + ' 条会话日志？此操作不可撤销。')) return;
+  console.log('[前端] batchDelete 确认删除, 发送请求...');
   try {
     var r = await api('/api/admin/logs/batch-delete', {
       method: 'POST',
       body: JSON.stringify({ ids: ids }),
     });
+    console.log('[前端] batchDelete 服务器返回:', r);
     toast('已删除 ' + (r.deleted || ids.length) + ' 条');
     exitEditMode();
     loadConversationList();
@@ -264,7 +267,7 @@ async function loadConversationList() {
   try {
     var t0 = performance.now();
     if (!currentSort) currentSort = { field: 'updated_at', dir: 'desc' };
-    var params = '?limit=200&sort=' + currentSort.field + '&dir=' + currentSort.dir;
+    var params = '?limit=200&sort=' + currentSort.field + '&dir=' + currentSort.dir + '&_t=' + Date.now();
     var fs = Object.keys(activeFilters).join(',');
     if (fs) params += '&fix_status=' + encodeURIComponent(fs);
     var data = await api('/api/admin/logs' + params);
