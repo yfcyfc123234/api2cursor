@@ -77,7 +77,7 @@ def _fix_deepseek_image_url(payload: dict[str, Any], _error: str) -> dict[str, A
                 if desc:
                     new_content.append({'type': 'text', 'text': '[用户发送了一张图片，内容描述: ' + desc + ']'})
                 else:
-                    new_content.append({'type': 'text', 'text': '[用户发送了一张图片，但当前模型不支持直接识别图片。请根据上下文推测图片内容并继续回答。]'})
+                    new_content.append({'type': 'text', 'text': '[用户发送了一张图片，但当前 AI 模型不支持图片识别。请在回复中首先明确告知用户：你发的图片我无法查看，因为当前使用的 DeepSeek 模型不支持图片输入。建议用户改用支持多模态的模型，或手动描述图片内容。然后根据上下文尽可能提供帮助。]'})
             else:
                 new_content.append(part)
         if has_image:
