@@ -216,7 +216,7 @@ def _handle_openai_non_stream(
             if p.get('fix_id'):
                 turn['_matched_fix_id'] = p['fix_id']
                 break
-        if timing and turn: turn['_timing'] = timing
+    if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)

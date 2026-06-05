@@ -418,8 +418,10 @@ def list_conversations(*, limit: int = 50, q: str = '', date: str = '',
             if q:
                 like = f'%{q}%'
                 where.append(
-                    "(id LIKE ? OR route LIKE ? OR last_client_model LIKE ? OR last_backend LIKE ?)")
-                params.extend([like, like, like, like])
+                    "(c.id LIKE ? OR c.route LIKE ? OR c.last_client_model LIKE ? OR c.last_backend LIKE ?"
+                    " OR EXISTS (SELECT 1 FROM turns t2 JOIN messages m2 ON t2.id = m2.turn_id"
+                    " WHERE t2.conversation_id = c.id AND m2.content LIKE ?))")
+                params.extend([like, like, like, like, like])
             if fix_status:
                 statuses = [s.strip() for s in fix_status.split(',') if s.strip()]
                 if statuses:
