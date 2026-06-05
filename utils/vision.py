@@ -1,7 +1,7 @@
 """视觉识别：将图片转为文字描述
 
 只在 DeepSeek 报 image_url 错误时才触发，不影响正常请求速度。
-使用 Anthropic Messages API（Claude Haiku），最快最便宜。
+支持多种后端，国内推荐通义千问 Qwen-VL（阿里云，实名即用）。
 """
 
 from __future__ import annotations
@@ -12,38 +12,38 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-VISION_MODEL = 'claude-haiku-4-5-20251001'  # 最快最便宜
+# 默认配置（可通过环境变量覆盖）
+VISION_MODEL = 'qwen-vl-max'       # 通义千问视觉模型
 VISION_MAX_TOKENS = 300
-VISION_TIMEOUT = 10  # 秒
+VISION_TIMEOUT = 10                 # 秒
 
 
 def describe_image(base64_data: str, media_type: str = 'image/png') -> str | None:
-    """调用 Claude Vision 描述图片内容。
+    """调用视觉模型描述图片内容。
 
-    返回不超过 300 token 的简洁描述，用于替换 image_url 传给 DeepSeek。
-    失败时返回 None，调用方应回退到 [图片] 占位符。
+    返回简洁描述，失败时返回 None（调用方应回退到 [图片]）。
+    支持 OpenAI 兼容接口（通义千问/GLM-4V/豆包 等）。
     """
     import time as _time
-    import os
 
     api_key = _get_vision_api_key()
     base_url = _get_vision_base_url()
+    model = _get_vision_model()
     if not api_key:
-        logger.warning('[视觉] 未配置 Vision API key，跳过')
+        logger.warning('[视觉] 未配置 VISION_API_KEY，跳过')
         return None
 
+    # OpenAI 兼容格式（通义千问、GLM-4V、豆包 等都支持）
     payload = {
-        'model': VISION_MODEL,
+        'model': model,
         'max_tokens': VISION_MAX_TOKENS,
         'messages': [{
             'role': 'user',
             'content': [
                 {
-                    'type': 'image',
-                    'source': {
-                        'type': 'base64',
-                        'media_type': media_type,
-                        'data': base64_data,
+                    'type': 'image_url',
+                    'image_url': {
+                        'url': f'data:{media_type};base64,{base64_data}',
                     },
                 },
                 {
@@ -59,15 +59,14 @@ def describe_image(base64_data: str, media_type: str = 'image/png') -> str | Non
 
     headers = {
         'Content-Type': 'application/json',
-        'x-api-key': api_key,
-        'anthropic-version': '2023-06-01',
+        'Authorization': f'Bearer {api_key}',
     }
 
     t0 = _time.time()
     try:
         import requests as _requests
         resp = _requests.post(
-            base_url.rstrip('/') + '/v1/messages',
+            base_url.rstrip('/') + '/v1/chat/completions',
             json=payload,
             headers=headers,
             timeout=VISION_TIMEOUT,
@@ -76,10 +75,10 @@ def describe_image(base64_data: str, media_type: str = 'image/png') -> str | Non
         if resp.status_code == 200:
             data = resp.json()
             text = ''
-            for block in data.get('content', []):
-                if block.get('type') == 'text':
-                    text += block.get('text', '')
-            logger.info('[视觉] 成功，%dms: %s', elapsed, text[:100])
+            for choice in data.get('choices', []):
+                msg = choice.get('message', {})
+                text += msg.get('content', '')
+            logger.info('[视觉] 成功 %dms: %s', elapsed, text[:100])
             return text.strip() or None
         else:
             logger.warning('[视觉] 失败 HTTP %d: %s', resp.status_code, resp.text[:200])
@@ -91,23 +90,15 @@ def describe_image(base64_data: str, media_type: str = 'image/png') -> str | Non
 
 
 def _get_vision_api_key() -> str:
-    """获取 Vision API key：优先环境变量，其次全局代理配置。"""
     import os
-    key = os.getenv('VISION_API_KEY', '').strip()
-    if key:
-        return key
-    # 回退到全局代理 API key（如果上游支持 Vision）
-    from config import Config
-    import settings
-    return settings.get_key() or Config.PROXY_API_KEY
+    return os.getenv('VISION_API_KEY', '').strip()
 
 
 def _get_vision_base_url() -> str:
-    """获取 Vision API 地址。"""
     import os
-    url = os.getenv('VISION_BASE_URL', '').strip()
-    if url:
-        return url
-    from config import Config
-    import settings
-    return settings.get_url() or Config.PROXY_TARGET_URL
+    return os.getenv('VISION_BASE_URL', '').strip() or 'https://dashscope.aliyuncs.com/compatible-mode'
+
+
+def _get_vision_model() -> str:
+    import os
+    return os.getenv('VISION_MODEL', '').strip() or VISION_MODEL
