@@ -30,6 +30,10 @@ def create_app():
     settings.load()
     conversation_index_mod.initialize()
 
+    # 启动实时日志广播
+    from utils import log_stream
+    log_stream.start()
+
     # ─── JSON 错误处理器 ──────────────────────────
 
     @app.route('/')

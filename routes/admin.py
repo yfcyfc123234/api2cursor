@@ -1065,6 +1065,40 @@ def admin_status_page():
     return send_from_directory(_STATIC_DIR, 'status.html')
 
 
+@bp.route('/api/admin/logs/live-stream', methods=['GET'])
+def logs_live_stream():
+    """SSE 实时日志流（给状态仪表盘用）。"""
+    err = _check_auth_with_query_key()
+    if err: return err
+    from utils import log_stream
+
+    def gen():
+        q = log_stream.subscribe()
+        try:
+            yield sse_data_message({'type': 'hello'})
+            while True:
+                try:
+                    entry = q.get(timeout=2)
+                except queue.Empty:
+                    yield sse_data_message({'type': 'ping'})
+                    continue
+                yield sse_data_message({'type': 'log', 'entry': entry})
+        finally:
+            log_stream.unsubscribe(q)
+
+    return sse_response(gen())
+
+
+@bp.route('/api/admin/logs/recent', methods=['GET'])
+def logs_recent():
+    """获取最近 N 条日志（用于初始加载）。"""
+    err = _check_auth()
+    if err: return err
+    from utils import log_stream
+    n = int(request.args.get('n', '50'))
+    return jsonify({'entries': log_stream.get_recent(n)})
+
+
 @bp.route('/api/admin/server-status', methods=['GET'])
 def server_status():
     """返回服务器实时状态数据。"""

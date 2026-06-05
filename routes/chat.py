@@ -136,11 +136,11 @@ def chat_completions():
     )
 
     log_route_context('聊天补全', ctx, extra=f'消息数={message_count}')
-    _log_messages(payload)
     # 统计计数
     from routes.admin import record_request, stream_started, stream_ended
     record_request()
     if is_stream: stream_started()
+    logger.info('[请求] 模型=%s 流式=%s 消息=%d', ctx.client_model, is_stream, message_count)
 
     if ctx.backend != 'responses':
         payload['messages'] = thinking_cache.inject(payload.get('messages', []))
