@@ -528,13 +528,11 @@ function renderConvMeta(turn) {
               turn.fix_status === 'fixed_failed' ? '❌ 修复失效' : '⏳ 修复待验证';
     html += '<span class="timing-info">' + fl2 + ' (规则: ' + escHtml(turn.matched_fix_id) + ')</span>';
   }
+  // 耗时也显示在元数据栏（顶部快速查看）
   if (turn.timing) {
     var t = turn.timing;
-    var parts = [];
-    if (t.upstream_ttfb_ms) parts.push('上游TTFB: <strong>' + t.upstream_ttfb_ms + 'ms</strong>');
-    if (t.upstream_total_ms) parts.push('上游总耗时: <strong>' + t.upstream_total_ms + 'ms</strong>');
-    if (t.attempts && t.attempts > 1) parts.push('尝试: <strong>' + t.attempts + '次</strong>');
-    if (parts.length) html += '<span class="timing-info">⏱ ' + parts.join(' | ') + '</span>';
+    var ms = t.upstream_total_ms || t.upstream_ttfb_ms || 0;
+    if (ms) html += '<span class="timing-info">⏱ ' + ms + 'ms</span>';
   }
   // 客户端 headers（可折叠）
   if (turn.client_headers) {
@@ -612,19 +610,27 @@ function renderMessages(turn) {
     html += '</div></div>';
   }
 
-  // 5. 流式摘要
+  // 5. 流式摘要 + 耗时统计
+  var metaBlocks = [];
   if (turn.stream && turn.stream_trace && turn.stream_trace.summary) {
     var sum = turn.stream_trace.summary;
+    var s = '📊 流式摘要: ' + (sum.chunk_count || sum.event_count || 0) + ' 个片段';
+    if (sum.usage) s += ' | Token: ' + (sum.usage.prompt_tokens || 0) + ' in / ' + (sum.usage.completion_tokens || 0) + ' out';
+    if (sum.truncated) s += ' | ⚠ 数据被截断';
+    metaBlocks.push(s);
+  }
+  if (turn.timing) {
+    var t = turn.timing;
+    var parts = [];
+    if (t.upstream_ttfb_ms) parts.push('上游TTFB: ' + t.upstream_ttfb_ms + 'ms');
+    if (t.upstream_total_ms) parts.push('上游总耗时: ' + t.upstream_total_ms + 'ms');
+    if (t.attempts && t.attempts > 1) parts.push('重试' + t.attempts + '次');
+    if (parts.length) metaBlocks.push('⏱ 转发耗时: ' + parts.join(' | '));
+  }
+  if (metaBlocks.length) {
     html += '<div class="chat-msg system" style="margin-top:8px">';
     html += '<div class="chat-bubble" style="max-height:none;font-size:11px;padding:6px 10px">';
-    html += '📊 流式摘要: ' + (sum.chunk_count || sum.event_count || 0) + ' 个片段';
-    if (sum.usage) {
-      html += ' | Token: ' + (sum.usage.prompt_tokens || 0) + ' in / ' +
-        (sum.usage.completion_tokens || 0) + ' out';
-    }
-    if (sum.truncated) {
-      html += ' | ⚠ 数据被截断（开启 VERBOSE_FULL_STREAM=1 可保留完整数据）';
-    }
+    html += metaBlocks.join('<br>');
     html += '</div></div>';
   }
 
