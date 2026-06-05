@@ -75,9 +75,9 @@ def _fix_deepseek_image_url(payload: dict[str, Any], _error: str) -> dict[str, A
                     except Exception:
                         desc = None
                 if desc:
-                    new_content.append({'type': 'text', 'text': '[图片描述: ' + desc + ']'})
+                    new_content.append({'type': 'text', 'text': '[用户发送了一张图片，内容描述: ' + desc + ']'})
                 else:
-                    new_content.append({'type': 'text', 'text': '[图片]'})
+                    new_content.append({'type': 'text', 'text': '[用户发送了一张图片，但当前模型不支持直接识别图片。请根据上下文推测图片内容并继续回答。]'})
             else:
                 new_content.append(part)
         if has_image:
