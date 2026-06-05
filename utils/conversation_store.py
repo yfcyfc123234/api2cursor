@@ -611,7 +611,7 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 'client_type': turn.get('client_type', ''),
                 'timing': _parse_json(turn.get('timing_json')),
                 'matched_fix_id': turn.get('matched_fix_id', ''),
-                'fix_status': conv.get('fix_status', ''),
+                'fix_status': conv['fix_status'] or '',
                 'upstream_request': None,  # 按需加载（对比视图时再取）
                 'stream_trace': {
                     'summary': _parse_json(turn['stream_summary']) or {},
