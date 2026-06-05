@@ -114,6 +114,29 @@ _register(
     lambda p, e: _fix_deepseek_image_url(p, e),  # 复用
 )
 
+def _fix_deepseek_reasoning_content(payload: dict[str, Any], _error: str) -> dict[str, Any]:
+    """剥离 assistant 消息中的 reasoning_content 字段。
+
+    DeepSeek 要求 reasoning_content 必须原样回传，但 Cursor 可能修改后带回。
+    直接删除该字段，让 DeepSeek 不再校验。
+    """
+    messages = payload.get('messages', [])
+    fixed = 0
+    for msg in messages:
+        if msg.get('role') == 'assistant' and 'reasoning_content' in msg:
+            del msg['reasoning_content']
+            fixed += 1
+    if fixed:
+        logger.info('[补丁] deepseek/reasoning_content: 剥离了 %d 条 assistant 消息的 reasoning_content', fixed)
+    return payload
+
+_register(
+    'deepseek',
+    r'reasoning_content.*must be passed back|reasoning_content.*thinking mode',
+    '剥离 assistant 消息中的 reasoning_content',
+    _fix_deepseek_reasoning_content,
+)
+
 # ── Anthropic 补丁 ──────────────────────────
 
 def _fix_anthropic_content_format(payload: dict[str, Any], _error: str) -> dict[str, Any]:
