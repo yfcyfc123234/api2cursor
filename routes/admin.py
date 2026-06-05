@@ -925,9 +925,8 @@ def logs_delete(conversation_id: str):
     except Exception:
         pass
 
-    date = (request.args.get('date') or '').strip() or None
-    fp = _find_conversation_file(conversation_id, date)
-    if fp:
+    # 删除所有相关 JSON 文件
+    for fp in _find_conversation_files_all(conversation_id):
         try:
             os.remove(fp)
         except OSError:
@@ -945,7 +944,7 @@ def logs_delete(conversation_id: str):
 
 @bp.route('/api/admin/logs/batch-delete', methods=['POST'])
 def logs_batch_delete():
-    """批量删除会话日志。"""
+    """批量删除会话日志（DB + 文件）。"""
     err = _check_auth()
     if err:
         return err
@@ -957,10 +956,30 @@ def logs_batch_delete():
     for conv_id in ids:
         try:
             conversation_store.delete_conversation(str(conv_id))
-            deleted += 1
         except Exception:
             pass
+        # 同步删除 JSON 文件
+        for fp in _find_conversation_files_all(str(conv_id)):
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+        deleted += 1
     return jsonify({'ok': True, 'deleted': deleted})
+
+
+def _find_conversation_files_all(conv_id: str) -> list[str]:
+    """查找某个会话的所有相关文件（完整文件 + turn 分片）。"""
+    if not os.path.isdir(_LOG_DIR):
+        return []
+    results = []
+    for day_dir in glob.glob(os.path.join(_LOG_DIR, '*')):
+        if not os.path.isdir(day_dir):
+            continue
+        for pattern in [f'{conv_id}.json', f'{conv_id}_turn*.json']:
+            for fp in glob.glob(os.path.join(day_dir, pattern)):
+                results.append(fp)
+    return results
 
 
 # ─── 修复规则管理 ─────────────────────────────────
