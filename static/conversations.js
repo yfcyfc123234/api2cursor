@@ -103,8 +103,6 @@ function autoLogin() {
   return false;
 }
 
-autoLogin();
-
 /* ===== 会话列表 ===== */
 var CONVERSATIONS = [];
 var currentSort = { field: 'updated_at', dir: 'desc' };
@@ -113,6 +111,8 @@ var currentDate = null;
 var activeFilters = {};
 var editMode = false;
 var selectedConvIds = {};
+
+autoLogin();
 
 function setSort(field) {
   if (currentSort.field === field) {
