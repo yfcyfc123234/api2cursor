@@ -435,7 +435,10 @@ def list_conversations(*, limit: int = 50, q: str = '', date: str = '',
                     if clauses:
                         where.append(f'({") OR (".join(clauses)})')
 
-            sql = f"SELECT * FROM conversations WHERE {' AND '.join(where)} ORDER BY {sf} {sd} LIMIT ?"
+            sql = f"""SELECT c.*,
+                (SELECT COUNT(*) FROM turns t WHERE t.conversation_id = c.id AND t.error_stage IS NOT NULL) as error_turn_count
+                FROM conversations c
+                WHERE {' AND '.join(where)} ORDER BY {sf} {sd} LIMIT ?"""
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]

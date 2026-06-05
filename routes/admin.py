@@ -776,7 +776,9 @@ def logs_list():
                 'created_at': row.get('created_at', '') or '',
                 'updated_at': updated or '',
                 'turn_count': int(row.get('turn_count', 0) or 0),
+                'error_turn_count': int(row.get('error_turn_count', 0) or 0),
                 'has_error': bool(row.get('has_error', 0)),
+                'fix_status': row.get('fix_status', '') or '',
                 'note': (notes.get(cid) or {}).get('note', ''),
             })
         t = (_time.time() - _start) * 1000

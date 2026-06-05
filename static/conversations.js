@@ -192,6 +192,40 @@ function updateBatchDeleteBtn() {
   var n = Object.keys(selectedConvIds).length;
   document.getElementById('btnBatchDelete').textContent = '🗑 批量删除(' + n + ')';
   document.getElementById('btnBatchDelete').disabled = n === 0;
+  document.getElementById('btnBatchCopy').textContent = '📋 复制错误信息(' + n + ')';
+  document.getElementById('btnBatchCopy').disabled = n === 0;
+}
+
+async function batchCopy() {
+  var ids = Object.keys(selectedConvIds);
+  if (!ids.length) return;
+  // 从列表数据中提取选中会话的错误信息
+  var lines = [];
+  lines.push('# 批量错误信息 (' + ids.length + ' 条会话)\n');
+  CONVERSATIONS.forEach(function(c) {
+    if (!selectedConvIds[c.conversation_id]) return;
+    lines.push('会话: ' + c.conversation_id);
+    lines.push('Turn: ' + (c.error_turn_count || '?') + ' 个错误 / ' + c.turn_count + ' 总轮数');
+    lines.push('模型: ' + (c.last_client_model || '?') + ' | 后端: ' + (c.last_backend || '?'));
+    lines.push('时间: ' + (c.updated_at || '?'));
+    if (c.fix_status) {
+      var fs = c.fix_status === 'fixed_success' ? '✅修复成功' :
+               c.fix_status === 'fixed_failed' ? '❌修复失败' : '⏳待验证';
+      lines.push('修复状态: ' + fs);
+    }
+    lines.push('---');
+  });
+  var text = lines.join('\n');
+
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    toast('已复制 ' + ids.length + ' 条会话的错误信息');
+  } catch(e) {
+    toast('复制失败: ' + e.message, false);
+  }
 }
 
 async function batchDelete() {
@@ -287,20 +321,25 @@ function renderConversationList() {
         ' onclick="event.stopPropagation();toggleSelectConv(\'' + escAttr(c.conversation_id) + '\')">';
     }
     html += '<span class="conv-id">' + escHtml(c.conversation_id) + '</span>';
-    if (c.has_error) html += '<span class="conv-badge conv-badge-error">错误</span>';
-    if (c.fix_status) {
-      var fb = c.fix_status === 'fixed_success' ? 'conv-fix-badge success' :
-               c.fix_status === 'fixed_failed' ? 'conv-fix-badge failed' :
-               'conv-fix-badge pending';
-      var fl = c.fix_status === 'fixed_success' ? '✅已修复' :
-               c.fix_status === 'fixed_failed' ? '❌修复失效' : '⏳待验证';
-      html += '<span class="' + fb + '">' + fl + '</span>';
+    // 状态标签
+    var et = c.error_turn_count || 0;
+    if (c.fix_status === 'fixed_success') {
+      html += '<span class="conv-badge" style="background:rgba(34,197,94,.15);color:#22c55e">✅已修复</span>';
+    } else if (c.fix_status === 'fixed_failed') {
+      html += '<span class="conv-badge" style="background:rgba(239,68,68,.15);color:#ef4444">❌修复失效(' + et + 'err)</span>';
+    } else if (c.fix_status === 'fixed_pending') {
+      html += '<span class="conv-badge" style="background:rgba(234,179,8,.15);color:#eab308">⏳待验证(' + et + 'err)</span>';
+    } else if (c.has_error) {
+      html += '<span class="conv-badge conv-badge-error">⚠' + et + '错误</span>';
     }
     html += '</div>';
     html += '<div class="conv-item-meta">';
-    html += '<span>' + escHtml(c.last_client_model || 'unknown') + '</span>';
-    html += '<span>via ' + escHtml(c.last_backend || '?') + '</span>';
-    html += '<span>' + c.turn_count + ' 轮</span>';
+    html += '<span>' + escHtml(c.last_client_model || '?') + '</span>';
+    html += '<span>' + escHtml(c.last_backend || '?') + '</span>';
+    html += '<span>' + c.turn_count + '轮</span>';
+    if (c.has_error && et > 0) {
+      html += '<span style="color:var(--red)">' + et + '/' + c.turn_count + '轮有误</span>';
+    }
     html += '</div>';
     html += '<div class="conv-item-time">' + formatTime(c.updated_at) + '</div>';
     html += '</div>';
