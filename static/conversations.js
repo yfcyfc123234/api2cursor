@@ -96,6 +96,9 @@ var CONVERSATIONS = [];
 var currentSort = { field: 'updated_at', dir: 'desc' };
 var currentConvId = null;
 var currentDate = null;
+var activeFilters = {};
+var editMode = false;
+var selectedConvIds = {};
 
 function setSort(field) {
   if (currentSort.field === field) {
@@ -124,11 +127,98 @@ function onSearch() {
   renderConversationList();
 }
 
+// ─── 筛选标签 ──────────────────────────────────────
+function toggleFilter(name) {
+  if (activeFilters[name]) {
+    delete activeFilters[name];
+  } else {
+    activeFilters[name] = true;
+  }
+  updateFilterTags();
+  loadConversationList();
+}
+
+function updateFilterTags() {
+  var tags = document.querySelectorAll('.filter-tag');
+  tags.forEach(function(t) {
+    var f = t.getAttribute('data-filter');
+    t.classList.toggle('active', !!activeFilters[f]);
+  });
+}
+
+// ─── 编辑模式 ──────────────────────────────────────
+function toggleEditMode() {
+  editMode = !editMode;
+  selectedConvIds = {};
+  document.getElementById('convList').classList.toggle('edit-mode', editMode);
+  document.getElementById('convEditBar').style.display = editMode ? 'flex' : 'none';
+  document.getElementById('btnEditMode').textContent = editMode ? '✖ 退出编辑' : '✏️ 编辑';
+  if (!editMode) updateBatchDeleteBtn();
+  renderConversationList();
+}
+
+function exitEditMode() {
+  editMode = false;
+  selectedConvIds = {};
+  document.getElementById('convList').classList.remove('edit-mode');
+  document.getElementById('convEditBar').style.display = 'none';
+  document.getElementById('btnEditMode').textContent = '✏️ 编辑';
+  renderConversationList();
+}
+
+function toggleSelectConv(convId) {
+  if (selectedConvIds[convId]) {
+    delete selectedConvIds[convId];
+  } else {
+    selectedConvIds[convId] = true;
+  }
+  updateBatchDeleteBtn();
+}
+
+function selectAll() {
+  var all = CONVERSATIONS.length > 0;
+  CONVERSATIONS.forEach(function(c) {
+    if (all && Object.keys(selectedConvIds).length === CONVERSATIONS.length) {
+      selectedConvIds = {};
+    } else {
+      selectedConvIds[c.conversation_id] = true;
+    }
+  });
+  updateBatchDeleteBtn();
+  renderConversationList();
+}
+
+function updateBatchDeleteBtn() {
+  var n = Object.keys(selectedConvIds).length;
+  document.getElementById('btnBatchDelete').textContent = '🗑 批量删除(' + n + ')';
+  document.getElementById('btnBatchDelete').disabled = n === 0;
+}
+
+async function batchDelete() {
+  var ids = Object.keys(selectedConvIds);
+  if (!ids.length) return;
+  if (!confirm('确认删除 ' + ids.length + ' 条会话日志？此操作不可撤销。')) return;
+  try {
+    var r = await api('/api/admin/logs/batch-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids: ids }),
+    });
+    toast('已删除 ' + (r.deleted || ids.length) + ' 条');
+    exitEditMode();
+    loadConversationList();
+  } catch (e) {
+    toast('批量删除失败: ' + e.message, false);
+  }
+}
+
 async function loadConversationList() {
   console.time('[前端] 加载会话列表');
   try {
     var t0 = performance.now();
-    var data = await api('/api/admin/logs?limit=200');
+    var params = '?limit=200&sort=' + currentSort.field + '&dir=' + currentSort.dir;
+    var fs = Object.keys(activeFilters).join(',');
+    if (fs) params += '&fix_status=' + encodeURIComponent(fs);
+    var data = await api('/api/admin/logs' + params);
     var apiMs = (performance.now() - t0).toFixed(0);
     console.log('[前端] API /api/admin/logs 返回 %d 条, 耗时 %s ms', (data.items || []).length, apiMs);
 
@@ -187,11 +277,25 @@ function renderConversationList() {
     if (c.conversation_id === currentConvId && c.date === currentDate) {
       cls += ' active';
     }
-    html += '<div class="' + cls + '" onclick="openConversation(\'' +
-      escAttr(c.conversation_id) + '\',\'' + escAttr(c.date) + '\')">';
+    html += '<div class="' + cls + '" onclick="if(editMode){toggleSelectConv(\'' +
+      escAttr(c.conversation_id) + '\');event.stopPropagation();}else{openConversation(\'' +
+      escAttr(c.conversation_id) + '\',\'' + escAttr(c.date) + '\')}">';
     html += '<div class="conv-item-top">';
+    if (editMode) {
+      html += '<input type="checkbox" class="conv-checkbox" ' +
+        (selectedConvIds[c.conversation_id] ? 'checked' : '') +
+        ' onclick="event.stopPropagation();toggleSelectConv(\'' + escAttr(c.conversation_id) + '\')">';
+    }
     html += '<span class="conv-id">' + escHtml(c.conversation_id) + '</span>';
     if (c.has_error) html += '<span class="conv-badge conv-badge-error">错误</span>';
+    if (c.fix_status) {
+      var fb = c.fix_status === 'fixed_success' ? 'conv-fix-badge success' :
+               c.fix_status === 'fixed_failed' ? 'conv-fix-badge failed' :
+               'conv-fix-badge pending';
+      var fl = c.fix_status === 'fixed_success' ? '✅已修复' :
+               c.fix_status === 'fixed_failed' ? '❌修复失效' : '⏳待验证';
+      html += '<span class="' + fb + '">' + fl + '</span>';
+    }
     html += '</div>';
     html += '<div class="conv-item-meta">';
     html += '<span>' + escHtml(c.last_client_model || 'unknown') + '</span>';
@@ -360,6 +464,11 @@ function renderConvMeta(turn) {
   }
   if (turn.error) {
     html += '<span class="meta-err">⚠ 有错误</span>';
+  }
+  if (turn.matched_fix_id) {
+    var fl2 = turn.fix_status === 'fixed_success' ? '✅ 修复生效' :
+              turn.fix_status === 'fixed_failed' ? '❌ 修复失效' : '⏳ 修复待验证';
+    html += '<span class="timing-info">' + fl2 + ' (规则: ' + escHtml(turn.matched_fix_id) + ')</span>';
   }
   if (turn.timing) {
     var t = turn.timing;

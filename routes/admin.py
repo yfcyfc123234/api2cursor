@@ -750,12 +750,14 @@ def logs_list():
     date = (request.args.get('date') or '').strip() or None
     sort = (request.args.get('sort') or 'updated_at').strip()
     dir_ = (request.args.get('dir') or 'desc').strip()
+    fix_status = (request.args.get('fix_status') or '').strip()
 
     notes = _load_log_notes()
 
     try:
         rows = conversation_store.list_conversations(
             limit=limit, q=q, date=date or '', sort_field=sort, sort_dir=dir_,
+            fix_status=fix_status,
         )
     except Exception:
         rows = []
@@ -936,6 +938,107 @@ def logs_delete(conversation_id: str):
         notes.pop(conversation_id, None)
         _save_log_notes(notes)
 
+    return jsonify({'ok': True})
+
+
+@bp.route('/api/admin/logs/batch-delete', methods=['POST'])
+def logs_batch_delete():
+    """批量删除会话日志。"""
+    err = _check_auth()
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    ids = data.get('ids') or []
+    if not ids or not isinstance(ids, list):
+        return jsonify({'error': '请提供 ids 列表'}), 400
+    deleted = 0
+    for conv_id in ids:
+        try:
+            conversation_store.delete_conversation(str(conv_id))
+            deleted += 1
+        except Exception:
+            pass
+    return jsonify({'ok': True, 'deleted': deleted})
+
+
+# ─── 修复规则管理 ─────────────────────────────────
+
+_FIXES_FILE = os.path.join(DATA_DIR, 'error_fixes.json')
+_FIXES_LOCK = threading.Lock()
+
+
+def _load_fixes() -> dict[str, Any]:
+    with _FIXES_LOCK:
+        if not os.path.exists(_FIXES_FILE):
+            return {'fixes': []}
+        try:
+            with open(_FIXES_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {'fixes': []}
+        except (OSError, json.JSONDecodeError):
+            return {'fixes': []}
+
+
+def _save_fixes(data: dict[str, Any]) -> None:
+    with _FIXES_LOCK:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_FIXES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@bp.route('/api/admin/error-fixes', methods=['GET'])
+def list_error_fixes():
+    err = _check_auth()
+    if err: return err
+    return jsonify(_load_fixes())
+
+
+@bp.route('/api/admin/error-fixes', methods=['POST'])
+def add_error_fix():
+    err = _check_auth()
+    if err: return err
+    data = request.get_json(force=True, silent=True) or {}
+    fixes = _load_fixes()
+    import time as _t
+    entry = {
+        'id': 'fix_' + str(int(_t.time())),
+        'error_pattern': str(data.get('error_pattern', '')),
+        'upstream_llm': str(data.get('upstream_llm', '')),
+        'problem': str(data.get('problem', '')),
+        'fix_description': str(data.get('fix_description', '')),
+        'fix_version': str(data.get('fix_version', '')),
+        'patch_handler': str(data.get('patch_handler', '')),
+        'status': 'active',
+        'created_at': datetime.now(timezone.utc).isoformat(),
+    }
+    fixes.setdefault('fixes', []).append(entry)
+    _save_fixes(fixes)
+    return jsonify({'ok': True, 'fix': entry})
+
+
+@bp.route('/api/admin/error-fixes/<fix_id>', methods=['PUT'])
+def update_error_fix(fix_id):
+    err = _check_auth()
+    if err: return err
+    data = request.get_json(force=True, silent=True) or {}
+    fixes = _load_fixes()
+    for f in fixes.get('fixes', []):
+        if f.get('id') == fix_id:
+            if 'status' in data: f['status'] = data['status']
+            if 'fix_description' in data: f['fix_description'] = data['fix_description']
+            if 'problem' in data: f['problem'] = data['problem']
+            _save_fixes(fixes)
+            return jsonify({'ok': True, 'fix': f})
+    return jsonify({'error': '未找到'}), 404
+
+
+@bp.route('/api/admin/error-fixes/<fix_id>', methods=['DELETE'])
+def delete_error_fix(fix_id):
+    err = _check_auth()
+    if err: return err
+    fixes = _load_fixes()
+    fixes['fixes'] = [f for f in fixes.get('fixes', []) if f.get('id') != fix_id]
+    _save_fixes(fixes)
     return jsonify({'ok': True})
 
 

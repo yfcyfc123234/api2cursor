@@ -45,6 +45,58 @@
   box-shadow: 0 0 6px var(--green);
 }
 
+/* 编辑模式操作栏 */
+.conv-edit-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(59,130,246,.08);
+}
+
+/* 筛选标签 */
+.conv-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.filter-label { font-size: 11px; color: var(--muted); margin-right: 2px; }
+.filter-tag {
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  transition: all .15s;
+}
+.filter-tag:hover { border-color: var(--primary); color: var(--text); }
+.filter-tag.active { background: var(--input); color: var(--primary); border-color: var(--primary); font-weight: 600; }
+
+/* 编辑模式 checkbox */
+.conv-checkbox {
+  display: none;
+  margin-right: 6px;
+  accent-color: var(--primary);
+}
+.edit-mode .conv-checkbox { display: inline-block; }
+
+/* 修复状态标签 */
+.conv-fix-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.conv-fix-badge.success { background: rgba(34,197,94,.15); color: var(--green); }
+.conv-fix-badge.failed { background: rgba(239,68,68,.15); color: var(--red); }
+.conv-fix-badge.pending { background: rgba(234,179,8,.15); color: var(--yellow); }
+
 /* 排序栏 */
 .conv-sort-bar {
   display: flex;

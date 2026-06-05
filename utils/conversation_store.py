@@ -26,7 +26,7 @@ from utils.http import gen_id
 logger = logging.getLogger(__name__)
 
 _DB_LOCK = threading.Lock()
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _STORE_PATH = os.path.join(DATA_DIR, 'conversations.db')
 
@@ -52,7 +52,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_client_model TEXT NOT NULL DEFAULT '',
             last_backend TEXT NOT NULL DEFAULT '',
             turn_count INTEGER NOT NULL DEFAULT 0,
-            has_error INTEGER NOT NULL DEFAULT 0
+            has_error INTEGER NOT NULL DEFAULT 0,
+            fix_status TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS turns (
@@ -81,6 +82,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             client_tools_json TEXT,
             client_type TEXT NOT NULL DEFAULT '',
             timing_json TEXT,
+            matched_fix_id TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (conversation_id) REFERENCES conversations(id)
         );
 
@@ -154,6 +156,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     if ver < 3:
         try:
             conn.execute("ALTER TABLE turns ADD COLUMN timing_json TEXT")
+        except sqlite3.OperationalError:
+            pass
+    if ver < 4:
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN fix_status TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE turns ADD COLUMN matched_fix_id TEXT NOT NULL DEFAULT ''")
         except sqlite3.OperationalError:
             pass
     if ver < _SCHEMA_VERSION:
@@ -232,8 +243,8 @@ def insert_turn(turn: dict[str, Any]) -> None:
                     duration_ms, prompt_tokens, completion_tokens, total_tokens,
                     error_stage, error_message, stream_summary, client_response, upstream_response,
                     client_user, client_stream_options, client_tools_json, client_type,
-                    timing_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    timing_json, matched_fix_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     turn_id, conv_id,
                     _compute_turn_index(conn, conv_id, turn_id),
@@ -248,6 +259,7 @@ def insert_turn(turn: dict[str, Any]) -> None:
                     stream_summary, client_response, upstream_response,
                     client_user, client_stream_opts, client_tools, client_type,
                     _safe_json(turn.get('_timing')),
+                    turn.get('_matched_fix_id', ''),
                 ),
             )
 
@@ -312,6 +324,7 @@ def insert_turn(turn: dict[str, Any]) -> None:
                     )
 
             # 7. 更新 conversation 元数据
+            matched_fid = turn.get('_matched_fix_id', '')
             conn.execute(
                 """UPDATE conversations
                    SET updated_at = ?, last_client_model = ?, last_backend = ?,
@@ -323,6 +336,16 @@ def insert_turn(turn: dict[str, Any]) -> None:
                  turn.get('client_model', ''), turn.get('backend', ''),
                  conv_id, conv_id, conv_id),
             )
+            # 如果有匹配的修复规则，标记为 pending
+            if matched_fid:
+                cur_fs = conn.execute(
+                    "SELECT fix_status FROM conversations WHERE id = ?", (conv_id,)
+                ).fetchone()
+                if cur_fs and cur_fs[0] in ('', 'fixed_pending'):
+                    conn.execute(
+                        "UPDATE conversations SET fix_status = 'fixed_pending' WHERE id = ?",
+                        (conv_id,),
+                    )
             conn.commit()
         finally:
             conn.close()
@@ -373,8 +396,12 @@ def _safe_json(val: Any) -> str | None:
 # ═══════════════════════════════════════════
 
 def list_conversations(*, limit: int = 50, q: str = '', date: str = '',
-                       sort_field: str = 'updated_at', sort_dir: str = 'desc') -> list[dict[str, Any]]:
-    """列出会话（用于管理面板列表）。"""
+                       sort_field: str = 'updated_at', sort_dir: str = 'desc',
+                       fix_status: str = '') -> list[dict[str, Any]]:
+    """列出会话（用于管理面板列表）。
+
+    fix_status: 逗号分隔多值，如 'has_error,fixed_failed'。
+    """
     with _DB_LOCK:
         conn = _connect()
         try:
@@ -393,6 +420,20 @@ def list_conversations(*, limit: int = 50, q: str = '', date: str = '',
                 where.append(
                     "(id LIKE ? OR route LIKE ? OR last_client_model LIKE ? OR last_backend LIKE ?)")
                 params.extend([like, like, like, like])
+            if fix_status:
+                statuses = [s.strip() for s in fix_status.split(',') if s.strip()]
+                if statuses:
+                    clauses = []
+                    for s in statuses:
+                        if s == 'has_error':
+                            clauses.append('has_error = 1 AND (fix_status = \'\' OR fix_status = \'fixed_failed\')')
+                        elif s in ('fixed_success', 'fixed_failed', 'fixed_pending'):
+                            clauses.append(f'fix_status = ?')
+                            params.append(s)
+                        elif s == 'no_error':
+                            clauses.append('has_error = 0')
+                    if clauses:
+                        where.append(f'({") OR (".join(clauses)})')
 
             sql = f"SELECT * FROM conversations WHERE {' AND '.join(where)} ORDER BY {sf} {sd} LIMIT ?"
             params.append(limit)
@@ -566,6 +607,8 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 'client_headers': _parse_json(clr['headers']) if clr else None,
                 'client_type': turn.get('client_type', ''),
                 'timing': _parse_json(turn.get('timing_json')),
+                'matched_fix_id': turn.get('matched_fix_id', ''),
+                'fix_status': conv.get('fix_status', ''),
                 'upstream_request': None,  # 按需加载（对比视图时再取）
                 'stream_trace': {
                     'summary': _parse_json(turn['stream_summary']) or {},

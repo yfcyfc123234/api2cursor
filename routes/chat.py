@@ -212,6 +212,10 @@ def _handle_openai_non_stream(
     )
     if patches and turn:
         turn['_patches_applied'] = [p['description'] for p in patches]
+        for p in patches:
+            if p.get('fix_id'):
+                turn['_matched_fix_id'] = p['fix_id']
+                break
         if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
@@ -245,6 +249,8 @@ def _handle_openai_stream(
         )
         if patches and turn:
             turn['_patches_applied'] = [p['description'] for p in patches]
+            pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), '')
+            if pfid: turn['_matched_fix_id'] = pfid
             if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
@@ -363,7 +369,7 @@ def _handle_responses_non_stream(
     attach_upstream_request(turn, payload, headers)
     resp, err, patches, timing = forward_with_patches(
         url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
-    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
     if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
@@ -394,7 +400,7 @@ def _handle_responses_stream(
         attach_upstream_request(turn, payload, headers)
         resp, err, patches, timing = forward_with_patches(
             url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=True)
-        if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+        if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
         if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
@@ -484,7 +490,7 @@ def _handle_gemini_non_stream(
     attach_upstream_request(turn, payload, headers)
     resp, err, patches, timing = forward_with_patches(
         url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
-    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
     if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
@@ -513,7 +519,7 @@ def _handle_gemini_stream(
         attach_upstream_request(turn, payload, headers)
         resp, err, patches, timing = forward_with_patches(
             url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=True)
-        if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+        if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
         if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
@@ -606,7 +612,7 @@ def _handle_anthropic_non_stream(
     attach_upstream_request(turn, payload, headers)
     resp, err, patches, timing = forward_with_patches(
         url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
-    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]
+    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
     if timing and turn: turn['_timing'] = timing
     if err:
         attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
@@ -645,6 +651,8 @@ def _handle_anthropic_stream(
         )
         if patches and turn:
             turn['_patches_applied'] = [p['description'] for p in patches]
+            pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), '')
+            if pfid: turn['_matched_fix_id'] = pfid
             if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})

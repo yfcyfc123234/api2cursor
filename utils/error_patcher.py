@@ -178,17 +178,34 @@ _register(
 #  匹配 & 应用
 # ═══════════════════════════════════════════
 
+def _load_fixes_from_config() -> list[dict[str, Any]]:
+    """从 error_fixes.json 加载手动标注的修复规则。"""
+    import json, os
+    from settings import DATA_DIR
+    fp = os.path.join(DATA_DIR, 'error_fixes.json')
+    if not os.path.exists(fp):
+        return []
+    try:
+        with open(fp, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('fixes', []) if isinstance(data, dict) else []
+    except Exception:
+        return []
+
+
 def match(error_body: str, upstream_llm: str, client_type: str = '') -> list[PatchAction]:
     """匹配错误消息，返回可应用的补丁列表。
 
-    按优先级：特定 LLM 补丁 > 通用补丁
+    优先级：硬编码补丁 > error_fixes.json 手动规则 > 通用补丁
+    返回的每个 PatchAction 可能含 `fix_id` 字段。
     """
     if not error_body:
         return []
 
     matched = []
-    # 检查特定 LLM 的补丁
     llm_key = _llm_key(upstream_llm)
+
+    # 1. 硬编码补丁
     for patch in _PATCHES.get(llm_key, []) + _PATCHES.get('generic', []):
         if patch['pattern'].search(error_body):
             matched.append({
@@ -197,6 +214,26 @@ def match(error_body: str, upstream_llm: str, client_type: str = '') -> list[Pat
                 'fix': patch['fix'],
                 'retryable': patch['retryable'],
             })
+
+    # 2. 手动标注的修复规则
+    for fix in _load_fixes_from_config():
+        if fix.get('status') != 'active':
+            continue
+        fix_llm = _llm_key(fix.get('upstream_llm', ''))
+        if fix_llm != llm_key and fix_llm != 'generic':
+            continue
+        try:
+            if re.search(fix.get('error_pattern', ''), error_body, re.IGNORECASE):
+                matched.append({
+                    'name': f"manual:{fix.get('problem', '')}",
+                    'description': fix.get('fix_description', ''),
+                    'fix': lambda p, e: p,  # 手动规则：标记但不修改请求
+                    'retryable': False,
+                    'fix_id': fix.get('id', ''),
+                })
+        except re.error:
+            pass
+
     return matched
 
 

@@ -51,22 +51,40 @@
         </div>
         <div class="conv-toolbar">
           <button class="btn btn-ghost btn-sm" onclick="loadConversationList()" title="刷新列表">&#x21bb; 刷新</button>
+          <button class="btn btn-ghost btn-sm" id="btnEditMode" onclick="toggleEditMode()">✏️ 编辑</button>
           <button class="btn btn-ghost btn-sm" id="liveToggleBtn" onclick="toggleLiveUpdates()" title="实时更新">
             <span id="liveDot" class="live-dot live-on"></span> 实时
           </button>
         </div>
       </div>
 
+      <!-- 编辑模式操作栏 -->
+      <div class="conv-edit-bar" id="convEditBar" style="display:none">
+        <button class="btn btn-ghost btn-sm" onclick="selectAll()">☑ 全选</button>
+        <button class="btn btn-red btn-sm" id="btnBatchDelete" onclick="batchDelete()">🗑 批量删除(0)</button>
+        <button class="btn btn-ghost btn-sm" onclick="exitEditMode()">✖ 取消</button>
+      </div>
+
+      <!-- 筛选标签 -->
+      <div class="conv-filter-bar" id="convFilterBar">
+        <span class="filter-label">筛选:</span>
+        <button class="filter-tag" data-filter="has_error" onclick="toggleFilter('has_error')">⚠ 有错误</button>
+        <button class="filter-tag" data-filter="fixed_pending" onclick="toggleFilter('fixed_pending')">⏳ 待验证</button>
+        <button class="filter-tag" data-filter="fixed_success" onclick="toggleFilter('fixed_success')">✅ 修复成功</button>
+        <button class="filter-tag" data-filter="fixed_failed" onclick="toggleFilter('fixed_failed')">❌ 修复失败</button>
+        <button class="filter-tag" data-filter="no_error" onclick="toggleFilter('no_error')">✅ 正常</button>
+      </div>
+
       <!-- 排序控制 -->
       <div class="conv-sort-bar">
         <span class="sort-label">排序：</span>
-        <button class="sort-btn active" data-sort="updated_at" data-dir="desc" onclick="setSort('updated_at')">
-          时间 <span class="sort-arrow">&#x25BC;</span>
+        <button class="sort-btn active" data-sort="updated_at" onclick="setSort('updated_at')">
+          时间 <span class="sort-arrow"></span>
         </button>
-        <button class="sort-btn" data-sort="last_client_model" data-dir="asc" onclick="setSort('last_client_model')">
+        <button class="sort-btn" data-sort="last_client_model" onclick="setSort('last_client_model')">
           模型 <span class="sort-arrow"></span>
         </button>
-        <button class="sort-btn" data-sort="turn_count" data-dir="desc" onclick="setSort('turn_count')">
+        <button class="sort-btn" data-sort="turn_count" onclick="setSort('turn_count')">
           轮数 <span class="sort-arrow"></span>
         </button>
       </div>
