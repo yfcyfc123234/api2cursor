@@ -956,16 +956,16 @@ def logs_batch_delete():
     for conv_id in ids:
         try:
             conversation_store.delete_conversation(str(conv_id))
-        except Exception:
-            pass
-        # 同步删除 JSON 文件
-        for fp in _find_conversation_files_all(str(conv_id)):
-            try:
-                os.remove(fp)
-            except OSError:
-                pass
-        deleted += 1
-    return jsonify({'ok': True, 'deleted': deleted})
+            # 同步删除 JSON 文件
+            for fp in _find_conversation_files_all(str(conv_id)):
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+            deleted += 1
+        except Exception as e:
+            logger.warning('删除会话 %s 失败: %s', conv_id, e)
+    return jsonify({'ok': True, 'deleted': deleted, 'total': len(ids)})
 
 
 def _find_conversation_files_all(conv_id: str) -> list[str]:

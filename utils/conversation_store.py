@@ -664,6 +664,7 @@ def delete_conversation(conv_id: str) -> None:
                 tid = turn_row['id']
                 conn.execute("DELETE FROM messages WHERE turn_id = ?", (tid,))
                 conn.execute("DELETE FROM upstream_requests WHERE turn_id = ?", (tid,))
+                conn.execute("DELETE FROM client_requests WHERE turn_id = ?", (tid,))
                 conn.execute("DELETE FROM stream_events WHERE turn_id = ?", (tid,))
             conn.execute("DELETE FROM turns WHERE conversation_id = ?", (conv_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
