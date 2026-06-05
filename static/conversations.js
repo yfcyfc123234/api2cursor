@@ -244,7 +244,7 @@ async function batchCopy() {
 
 async function batchDelete() {
   var ids = Object.keys(selectedConvIds);
-  console.log('[前端] batchDelete 选中 %d 条, ids=%s', ids.length, ids.join(','));
+  console.log('[前端] batchDelete 选中 ' + ids.length + ' 条, ids=' + ids.join(','));
   if (!ids.length) return;
   if (!confirm('确认删除 ' + ids.length + ' 条会话日志？此操作不可撤销。')) return;
   console.log('[前端] batchDelete 确认删除, 发送请求...');
@@ -272,7 +272,7 @@ async function loadConversationList() {
     if (fs) params += '&fix_status=' + encodeURIComponent(fs);
     var data = await api('/api/admin/logs' + params);
     var apiMs = (performance.now() - t0).toFixed(0);
-    console.log('[前端] API /api/admin/logs 返回 %d 条, 耗时 %s ms', (data.items || []).length, apiMs);
+    console.log('[前端] API /api/admin/logs 返回 ' + (data.items || []).length + ' 条, 耗时 ' + apiMs + ' ms');
 
     CONVERSATIONS = data.items || [];
     renderConversationList();
@@ -364,7 +364,7 @@ function renderConversationList() {
     html += '</div>';
   });
   listEl.innerHTML = html;
-  console.log('[前端] 渲染列表 %d 条, 耗时 %.0f ms', sorted.length, performance.now() - t0);
+  console.log('[前端] 渲染列表 ' + sorted.length + ' 条, 耗时 ' + (performance.now() - t0).toFixed(0) + ' ms');
 }
 
 function escHtml(s) {
@@ -419,7 +419,7 @@ async function openConversation(convId, date) {
     var apiMs = (performance.now() - t0).toFixed(0);
     var doc = data.conversation;
     var totalTurns = doc._total_turns || 1;
-    console.log('[前端] API /api/admin/logs/%s?turn=0 总turns=%d, 耗时 %s ms', convId, totalTurns, apiMs);
+    console.log('[前端] API /api/admin/logs/' + convId + '?turn=0 总turns=' + totalTurns + ', 耗时 ' + apiMs + ' ms');
     // 补全 turn 数组以便 turn bar 渲染
     currentDoc = doc;
     currentDoc._allTurnCount = totalTurns;
@@ -477,7 +477,7 @@ async function fetchTurn(idx) {
     var fetchedTurn = newDoc.turns[0];
     currentDoc.turns[idx] = fetchedTurn;
     if (newDoc._total_turns) currentDoc._allTurnCount = newDoc._total_turns;
-    console.log('[前端] fetchTurn(%d) 耗时 %s ms', idx, apiMs);
+    console.log('[前端] fetchTurn(' + idx + ') 耗时 ' + apiMs + ' ms');
     loadTurn(idx);
   } catch (e) {
     document.getElementById('chatMessages').innerHTML =
@@ -674,11 +674,7 @@ function renderMessages(turn) {
     });
   });
 
-  console.log('[前端] 渲染消息 %d 条 (含%s流式), 耗时 %.0f ms',
-    msgs.length,
-    (turn.stream && turn.stream_trace && turn.stream_trace.client_events &&
-     turn.stream_trace.client_events.length > 0) ? '' : '无',
-    performance.now() - t0);
+  console.log('[前端] 渲染消息 ' + msgs.length + ' 条, 耗时 ' + (performance.now() - t0).toFixed(0) + ' ms');
   } catch(e) {
     console.error('[前端] renderMessages 崩溃:', e);
   }
