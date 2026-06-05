@@ -290,6 +290,7 @@ def forward_with_patches(
                 'upstream_ttfb_ms': upstream_ttfb_ms,
                 'upstream_total_ms': upstream_elapsed_ms,
                 'attempts': attempt + 1,
+                'retries': attempt,
             }
             return resp, None, patches_applied, timing
 
@@ -303,6 +304,7 @@ def forward_with_patches(
         if not patches:
             break
 
+        patch_start = _time.time()
         for patch in patches:
             if not patch.get('retryable', True):
                 continue
@@ -313,6 +315,7 @@ def forward_with_patches(
                 patches_applied.append(patch)
             except Exception as e:
                 logger.warning('[补丁] 应用失败: %s', e)
+        patch_ms = int((_time.time() - patch_start) * 1000)
 
     # 所有重试都失败
     if patches_applied:
@@ -323,6 +326,8 @@ def forward_with_patches(
         'upstream_ttfb_ms': upstream_ttfb_ms,
         'upstream_total_ms': upstream_elapsed_ms,
         'attempts': max_retries + 1,
+        'retries': max_retries,
+        'patch_ms': patch_ms if patches_applied else 0,
         'error': str(err)[:200],
     }
     return None, err, patches_applied, timing

@@ -528,11 +528,21 @@ function renderConvMeta(turn) {
               turn.fix_status === 'fixed_failed' ? '❌ 修复失效' : '⏳ 修复待验证';
     html += '<span class="timing-info">' + fl2 + ' (规则: ' + escHtml(turn.matched_fix_id) + ')</span>';
   }
-  // 耗时也显示在元数据栏（顶部快速查看）
+  // 耗时统计（可展开详情）
   if (turn.timing) {
     var t = turn.timing;
-    var ms = t.upstream_total_ms || t.upstream_ttfb_ms || 0;
-    if (ms) html += '<span class="timing-info">⏱ ' + ms + 'ms</span>';
+    var ms = t.total_ms || t.upstream_total_ms || t.upstream_ttfb_ms || 0;
+    html += '<details class="timing-details" style="display:inline;font-size:11px">';
+    html += '<summary class="timing-summary" style="cursor:pointer;color:var(--yellow);display:inline;margin-left:8px">⏱ ' + ms + 'ms</summary>';
+    html += '<div class="timing-popup" style="position:absolute;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;z-index:10;margin-top:4px;font-size:11px;line-height:1.8;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.3)">';
+    if (t.proxy_prepare_ms !== undefined) html += '代理处理: <strong>' + t.proxy_prepare_ms + 'ms</strong><br>';
+    if (t.upstream_ttfb_ms) html += '上游TTFB: <strong>' + t.upstream_ttfb_ms + 'ms</strong><br>';
+    if (t.upstream_total_ms) html += '上游总耗时: <strong>' + t.upstream_total_ms + 'ms</strong><br>';
+    if (t.stream_first_chunk_ms) html += '首chunk到达: <strong>' + t.stream_first_chunk_ms + 'ms</strong><br>';
+    if (t.total_ms) html += '端到端总耗时: <strong>' + t.total_ms + 'ms</strong><br>';
+    if (t.retries && t.retries > 0) html += '补丁重试: <strong>' + t.retries + '次</strong><br>';
+    if (t.attempts && t.attempts > 1) html += '总尝试: <strong>' + t.attempts + '次</strong><br>';
+    html += '</div></details>';
   }
   // 客户端 headers（可折叠）
   if (turn.client_headers) {

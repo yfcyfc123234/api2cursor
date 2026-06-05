@@ -251,7 +251,7 @@ def _handle_openai_stream(
             turn['_patches_applied'] = [p['description'] for p in patches]
             pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), '')
             if pfid: turn['_matched_fix_id'] = pfid
-            if timing and turn: turn['_timing'] = timing
+        if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
@@ -263,9 +263,16 @@ def _handle_openai_stream(
         chunk_count = 0
         last_usage = None
         client_chunks: list[dict[str, Any]] = []
+        _t_req = _t.time()
+        _t_prev = _t_req
 
         for chunk in iter_openai_sse(resp):
+            if chunk_count == 0:
+                turn['_timing']['stream_first_chunk_ms'] = int((_t.time() - _t_req) * 1000)
             if chunk is None:
+                _t_end = _t.time()
+                turn['_timing']['stream_total_ms'] = int((_t_end - _t_req) * 1000)
+                turn['_timing']['total_ms'] = int((_t_end - _t_req) * 1000)
                 _dbg(f'流式响应结束，共 {chunk_count} 个数据片段')
                 close_chunk = think_extractor.finalize()
                 if close_chunk:
@@ -653,7 +660,7 @@ def _handle_anthropic_stream(
             turn['_patches_applied'] = [p['description'] for p in patches]
             pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), '')
             if pfid: turn['_matched_fix_id'] = pfid
-            if timing and turn: turn['_timing'] = timing
+        if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
