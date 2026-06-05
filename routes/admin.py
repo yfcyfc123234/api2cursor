@@ -1077,21 +1077,66 @@ def server_status():
     """返回服务器实时状态数据。"""
     err = _check_auth()
     if err: return err
-    import time, os, threading, psutil
+    import os as _os, threading
 
-    now = time.time()
+    # 内存 (读取 /proc/meminfo)
+    mem_total = mem_used = 0
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemTotal:'): mem_total = int(line.split()[1])
+                if line.startswith('MemAvailable:'): mem_free = int(line.split()[1])
+        mem_used = (mem_total - mem_free) // 1024 if mem_total else 0
+        mem_total = mem_total // 1024 if mem_total else 0
+    except Exception:
+        pass
+
+    # 进程内存
+    proc_mem = 0
+    try:
+        with open(f'/proc/{_os.getpid()}/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'): proc_mem = int(line.split()[1]) // 1024; break
+    except Exception:
+        pass
+
+    # CPU (读取 /proc/stat)
+    cpu_pct = 0
+    try:
+        with open('/proc/stat') as f:
+            fields = [int(x) for x in f.readline().split()[1:]]
+        idle = fields[3]
+        total = sum(fields)
+        cpu_pct = round((1 - idle / total) * 100, 1) if total else 0
+    except Exception:
+        pass
+
+    # 磁盘
+    disk_free = 0
+    try:
+        st = _os.statvfs(DATA_DIR)
+        disk_free = round(st.f_frsize * st.f_bavail / 1024 / 1024 / 1024, 1)
+    except Exception:
+        pass
+
+    # 运行时间
+    uptime = 0
+    try:
+        with open('/proc/uptime') as f:
+            uptime = int(float(f.readline().split()[0]))
+    except Exception:
+        pass
+
     stats = {
         'server': {
-            'uptime_seconds': int(now - psutil.boot_time()) if hasattr(psutil, 'boot_time') else 0,
-            'python_version': sys.version.split()[0] if hasattr(sys, 'version') else '?',
+            'uptime_seconds': uptime,
             'time': datetime.now(timezone.utc).isoformat(),
         },
         'resources': {
-            'cpu_percent': psutil.cpu_percent(interval=0.1),
-            'memory_used_mb': round(psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024, 1),
-            'memory_total_mb': round(psutil.virtual_memory().total / 1024 / 1024),
-            'disk_free_gb': round(psutil.disk_usage(DATA_DIR).free / 1024 / 1024 / 1024, 1),
-            'open_files': len(psutil.Process(os.getpid()).open_files()),
+            'cpu_percent': cpu_pct,
+            'memory_used_mb': proc_mem,
+            'memory_total_mb': mem_total,
+            'disk_free_gb': disk_free,
             'threads': threading.active_count(),
         },
         'proxy': {
