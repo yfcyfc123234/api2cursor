@@ -11,12 +11,26 @@ function togglePwd(id) {
 
 function toast(msg, ok) {
   if (ok === undefined) ok = true;
-  const area = document.getElementById('toasts');
-  const el = document.createElement('div');
+  var area = document.getElementById('toasts');
+  var el = document.createElement('div');
   el.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
-  el.textContent = msg;
+  el.innerHTML = '<span>' + escHtml(String(msg)) + '</span>';
+  if (!ok) {
+    var btn = document.createElement('button');
+    btn.textContent = '📋复制';
+    btn.style.cssText = 'margin-left:8px;padding:1px 6px;font-size:11px;border:1px solid #555;border-radius:3px;background:#333;color:#ccc;cursor:pointer';
+    btn.onclick = function() {
+      var ta = document.createElement('textarea');
+      ta.value = msg; ta.style.cssText = 'position:fixed;left:-9999px';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta);
+      btn.textContent = '✅已复制';
+      setTimeout(function(){ btn.textContent = '📋复制'; }, 2000);
+    };
+    el.appendChild(btn);
+  }
   area.appendChild(el);
-  setTimeout(function () { el.remove(); }, 3000);
+  setTimeout(function () { el.remove(); }, ok ? 3000 : 10000);
 }
 
 async function api(path, opts) {
@@ -249,6 +263,7 @@ async function loadConversationList() {
   console.time('[前端] 加载会话列表');
   try {
     var t0 = performance.now();
+    if (!currentSort) currentSort = { field: 'updated_at', dir: 'desc' };
     var params = '?limit=200&sort=' + currentSort.field + '&dir=' + currentSort.dir;
     var fs = Object.keys(activeFilters).join(',');
     if (fs) params += '&fix_status=' + encodeURIComponent(fs);
@@ -267,6 +282,7 @@ async function loadConversationList() {
 }
 
 function sortConversations(items) {
+  if (!currentSort) currentSort = { field: 'updated_at', dir: 'desc' };
   var field = currentSort.field;
   var dir = currentSort.dir;
   return items.slice().sort(function (a, b) {
