@@ -44,29 +44,46 @@ def _register(upstream: str, pattern: str, description: str, fix_fn, retryable: 
 # ── DeepSeek 补丁 ──────────────────────────
 
 def _fix_deepseek_image_url(payload: dict[str, Any], _error: str) -> dict[str, Any]:
-    """将 messages 中的 image_url content 替换为文本占位 [图片]。
+    """将 messages 中的 image_url content 替换为文本描述。
 
-    DeepSeek 不支持 image_url content 类型，会返回:
-    "unknown variant `image_url`, expected `text`"
+    优先调用 Vision API 识别图片内容，失败则回退到占位符 [图片]。
+    DeepSeek 不支持 image_url content 类型。
     """
+    from utils.vision import describe_image
+
     messages = payload.get('messages', [])
     fixed_count = 0
     for msg in messages:
         content = msg.get('content')
-        if isinstance(content, list):
-            new_content = []
-            has_image = False
-            for part in content:
-                if isinstance(part, dict) and part.get('type') == 'image_url':
-                    has_image = True
-                    fixed_count += 1
+        if not isinstance(content, list):
+            continue
+        new_content = []
+        has_image = False
+        for part in content:
+            if isinstance(part, dict) and part.get('type') == 'image_url':
+                has_image = True
+                fixed_count += 1
+                # 尝试 Vision API
+                img = part.get('image_url', {}).get('url', '')
+                desc = None
+                if img.startswith('data:'):
+                    # data:image/png;base64,xxxxx
+                    try:
+                        header, b64 = img.split(',', 1)
+                        media = header.split(':')[1].split(';')[0] if ':' in header else 'image/png'
+                        desc = describe_image(b64, media)
+                    except Exception:
+                        desc = None
+                if desc:
+                    new_content.append({'type': 'text', 'text': '[图片描述: ' + desc + ']'})
                 else:
-                    new_content.append(part)
-            if has_image:
-                new_content.insert(0, {'type': 'text', 'text': '[图片]'})
-                msg['content'] = new_content
+                    new_content.append({'type': 'text', 'text': '[图片]'})
+            else:
+                new_content.append(part)
+        if has_image:
+            msg['content'] = new_content
     if fixed_count:
-        logger.info('[补丁] deepseek/image_url: 替换了 %d 个 image_url → [图片]', fixed_count)
+        logger.info('[补丁] deepseek/image_url: 替换了 %d 个 image_url', fixed_count)
     return payload
 
 
