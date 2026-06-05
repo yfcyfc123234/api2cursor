@@ -1175,6 +1175,7 @@ _STATS_LOCK = threading.Lock()
 _last_min_counter = [0, 0.0]  # [count, window_start]
 
 def record_request():
+    global _last_min_counter
     with _STATS_LOCK:
         _STATS['total_requests'] += 1
         now = time.time()
@@ -1185,6 +1186,7 @@ def record_request():
             _last_min_counter[0] += 1
 
 def record_error(msg: str):
+    global _STATS
     with _STATS_LOCK:
         _STATS['total_errors'] += 1
         _STATS['recent_errors'].append({
@@ -1195,6 +1197,7 @@ def record_error(msg: str):
             _STATS['recent_errors'] = _STATS['recent_errors'][-50:]
 
 def record_patch(success: bool):
+    global _STATS
     with _STATS_LOCK:
         _STATS['patch_applied'] += 1
         if success:
@@ -1203,10 +1206,12 @@ def record_patch(success: bool):
             _STATS['patch_failed'] += 1
 
 def stream_started():
+    global _STATS
     with _STATS_LOCK:
         _STATS['active_streams'] += 1
 
 def stream_ended():
+    global _STATS
     with _STATS_LOCK:
         _STATS['active_streams'] = max(0, _STATS['active_streams'] - 1)
 
