@@ -406,6 +406,7 @@ async function loadMappings() {
         </div>
         <div class="mapping-actions">
           <button class="btn btn-ghost btn-sm" onclick="openEditModal('${esc(name)}')">编辑</button>
+          <button class="btn btn-ghost btn-sm" onclick="copyMapping('${esc(name)}')">复制</button>
           <button class="btn btn-red btn-sm" onclick="deleteMapping('${esc(name)}')">删除</button>
         </div>
       </div>
@@ -416,6 +417,23 @@ async function loadMappings() {
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 // ─── 弹窗 ──────────────────────────────────────────
+async function copyMapping(name) {
+  var mappings = await api('/api/admin/mappings');
+  var m = mappings[name];
+  if (!m) { toast('映射不存在', false); return; }
+  openAddModal();
+  document.getElementById('modalTitle').textContent = '复制模型映射';
+  document.getElementById('mappingOriginalName').value = '';
+  document.getElementById('mappingName').value = name + '_copy';
+  document.getElementById('mappingUpstreamModel').value = m.upstream_model || name;
+  document.getElementById('mappingBackend').value = m.backend || 'auto';
+  document.getElementById('mappingTargetUrl').value = m.target_url || '';
+  document.getElementById('mappingApiKey').value = m.api_key || '';
+  document.getElementById('mappingInstructions').value = m.custom_instructions || '';
+  document.getElementById('mappingInstructionsPos').value = m.instructions_position || 'prepend';
+  editingName = null;
+}
+
 function openAddModal() {
   editingName = null;
   document.getElementById('modalTitle').textContent = '添加模型映射';
