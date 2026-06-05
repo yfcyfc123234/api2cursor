@@ -287,6 +287,15 @@ def finalize_turn(
     if stream_trace.get('upstream_dropped', 0) or stream_trace.get('client_dropped', 0):
         summary['truncated'] = True
 
+    # 流式结束统计
+    try:
+        from routes.admin import stream_ended, record_error, record_patch
+        stream_ended()
+        if turn.get('error'): record_error(str(turn['error'])[:200])
+        if turn.get('_patches_applied'): record_patch(not turn.get('error'))
+    except Exception:
+        pass
+
     threading.Thread(target=_write_turn, args=(deep_copy_jsonable(turn),), daemon=True).start()
     try:
         _emit_live_event(

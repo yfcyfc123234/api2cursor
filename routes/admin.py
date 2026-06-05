@@ -1063,6 +1063,125 @@ def delete_error_fix(fix_id):
     return jsonify({'ok': True})
 
 
+@bp.route('/admin/status')
+@bp.route('/admin/status/')
+def admin_status_page():
+    """返回服务器状态仪表盘页面。"""
+    return send_from_directory(_STATIC_DIR, 'status.html')
+
+
+@bp.route('/api/admin/server-status', methods=['GET'])
+def server_status():
+    """返回服务器实时状态数据。"""
+    err = _check_auth()
+    if err: return err
+    import time, os, threading, psutil
+
+    now = time.time()
+    stats = {
+        'server': {
+            'uptime_seconds': int(now - psutil.boot_time()) if hasattr(psutil, 'boot_time') else 0,
+            'python_version': sys.version.split()[0] if hasattr(sys, 'version') else '?',
+            'time': datetime.now(timezone.utc).isoformat(),
+        },
+        'resources': {
+            'cpu_percent': psutil.cpu_percent(interval=0.1),
+            'memory_used_mb': round(psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024, 1),
+            'memory_total_mb': round(psutil.virtual_memory().total / 1024 / 1024),
+            'disk_free_gb': round(psutil.disk_usage(DATA_DIR).free / 1024 / 1024 / 1024, 1),
+            'open_files': len(psutil.Process(os.getpid()).open_files()),
+            'threads': threading.active_count(),
+        },
+        'proxy': {
+            'total_requests': _STATS['total_requests'],
+            'total_errors': _STATS['total_errors'],
+            'active_streams': _STATS['active_streams'],
+            'requests_last_min': _STATS['requests_last_min'],
+            'patch_applied': _STATS['patch_applied'],
+            'patch_success': _STATS['patch_success'],
+            'patch_failed': _STATS['patch_failed'],
+        },
+        'upstream': {
+            'url': settings.get_url(),
+            'health': _check_upstream_health(),
+        },
+        'recent_errors': list(_STATS['recent_errors'])[-10:],
+    }
+
+    # 会话统计
+    try:
+        stats['conversations'] = {
+            'total': conversation_store.get_conversation_count(),
+            'with_errors': len(conversation_store.list_conversations(limit=1000, fix_status='has_error')),
+        }
+    except Exception:
+        stats['conversations'] = {'total': 0, 'with_errors': 0}
+
+    return jsonify(stats)
+
+
+# ─── 运行时统计 ────────────────────────────────
+_STATS = {
+    'total_requests': 0,
+    'total_errors': 0,
+    'active_streams': 0,
+    'requests_last_min': 0,
+    'patch_applied': 0,
+    'patch_success': 0,
+    'patch_failed': 0,
+    'recent_errors': [],
+}
+_STATS_LOCK = threading.Lock()
+_last_min_counter = [0, time.time()]  # [count, window_start]
+
+def record_request():
+    with _STATS_LOCK:
+        _STATS['total_requests'] += 1
+        now = time.time()
+        if now - _last_min_counter[1] > 60:
+            _STATS['requests_last_min'] = _last_min_counter[0]
+            _last_min_counter = [1, now]
+        else:
+            _last_min_counter[0] += 1
+
+def record_error(msg: str):
+    with _STATS_LOCK:
+        _STATS['total_errors'] += 1
+        _STATS['recent_errors'].append({
+            'time': datetime.now(timezone.utc).isoformat(),
+            'message': msg[:200],
+        })
+        if len(_STATS['recent_errors']) > 50:
+            _STATS['recent_errors'] = _STATS['recent_errors'][-50:]
+
+def record_patch(success: bool):
+    with _STATS_LOCK:
+        _STATS['patch_applied'] += 1
+        if success:
+            _STATS['patch_success'] += 1
+        else:
+            _STATS['patch_failed'] += 1
+
+def stream_started():
+    with _STATS_LOCK:
+        _STATS['active_streams'] += 1
+
+def stream_ended():
+    with _STATS_LOCK:
+        _STATS['active_streams'] = max(0, _STATS['active_streams'] - 1)
+
+def _check_upstream_health():
+    import requests as _r
+    try:
+        t0 = time.time()
+        r = _r.get(settings.get_url().rstrip('/') + '/models', timeout=5,
+                   headers={'Authorization': 'Bearer ' + (settings.get_key() or 'none')})
+        ms = int((time.time() - t0) * 1000)
+        return {'ok': r.status_code < 500, 'status': r.status_code, 'latency_ms': ms}
+    except Exception as e:
+        return {'ok': False, 'status': 0, 'latency_ms': 0, 'error': str(e)[:100]}
+
+
 @bp.route('/api/admin/logs/search', methods=['GET'])
 def logs_search():
     """全文搜索消息内容。"""

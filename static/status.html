@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API 2 Cursor - 服务器状态</title>
+<link rel="stylesheet" href="/static/admin.css">
+<style>
+.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.stat-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.stat-card .value { font-size: 28px; font-weight: 700; }
+.stat-card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.value.green { color: var(--green); }
+.value.red { color: var(--red); }
+.value.yellow { color: var(--yellow); }
+.value.blue { color: var(--primary); }
+.row { display: flex; gap: 14px; flex-wrap: wrap; }
+.row > * { flex: 1; min-width: 300px; }
+.error-item { font-size: 11px; padding: 4px 0; border-bottom: 1px solid var(--border); font-family: monospace; }
+.error-item .time { color: var(--muted); margin-right: 8px; }
+.refresh-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; font-size: 13px; color: var(--muted); }
+.refresh-bar .auto { display: flex; align-items: center; gap: 4px; }
+#lastUpdate { font-family: monospace; }
+.nav-link { font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="dashboard">
+<header>
+  <div class="container inner">
+    <h1>API 2 Cursor - 服务器状态</h1>
+    <div class="right">
+      <span class="status" id="statusBadge">运行中</span>
+      <button class="btn btn-ghost btn-sm" onclick="location.href='/admin'">管理面板</button>
+      <button class="btn btn-ghost btn-sm" onclick="location.href='/admin/conversations'">会话回放</button>
+      <button class="btn btn-ghost btn-sm" onclick="location.href='/admin/logs'">日志面板</button>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+  <div class="refresh-bar">
+    <span>上次更新: <strong id="lastUpdate">-</strong></span>
+    <label class="auto"><input type="checkbox" id="autoRefresh" checked onchange="toggleAuto()"> 自动刷新</label>
+    <span>(5秒)</span>
+    <button class="btn btn-ghost btn-sm" onclick="loadStatus()">🔄 立即刷新</button>
+  </div>
+
+  <!-- 核心指标 -->
+  <div class="status-grid" id="coreMetrics"></div>
+
+  <div class="row">
+    <!-- 资源使用 -->
+    <div class="stat-card">
+      <div class="label">💻 系统资源</div>
+      <div id="resourceInfo" style="font-size:14px;line-height:2">加载中...</div>
+    </div>
+    <!-- 上游状态 -->
+    <div class="stat-card">
+      <div class="label">🔗 上游连接</div>
+      <div id="upstreamInfo" style="font-size:14px;line-height:2">加载中...</div>
+    </div>
+  </div>
+
+  <!-- 最近错误 -->
+  <div class="card" style="margin-top:14px">
+    <div class="card-header"><h2>⚠ 最近错误</h2><span class="badge" id="errorCount">0</span></div>
+    <div id="errorList" style="max-height:260px;overflow-y:auto;font-size:12px"><div class="empty">暂无错误</div></div>
+  </div>
+</main>
+</div>
+
+<script>
+var API2 = '';
+var AUTH = sessionStorage.getItem('_ak') || '';
+
+function api2(path) {
+  var h = { 'Content-Type': 'application/json' };
+  if (AUTH) h['Authorization'] = 'Bearer ' + AUTH;
+  return fetch(API2 + path, { headers: h }).then(function(r) { return r.json(); });
+}
+
+function toggleAuto() {
+  if (document.getElementById('autoRefresh').checked) startAuto();
+  else stopAuto();
+}
+
+var timer = null;
+function startAuto() { stopAuto(); timer = setInterval(loadStatus, 5000); }
+function stopAuto() { if (timer) { clearInterval(timer); timer = null; } }
+
+function loadStatus() {
+  api2('/api/admin/server-status').then(renderStatus).catch(function(e) {
+    document.getElementById('statusBadge').textContent = '离线';
+    document.getElementById('statusBadge').style.background = 'rgba(239,68,68,.15)';
+    document.getElementById('statusBadge').style.color = 'var(--red)';
+  });
+}
+
+function renderStatus(s) {
+  document.getElementById('statusBadge').textContent = '运行中';
+  document.getElementById('statusBadge').style.background = 'rgba(34,197,94,.15)';
+  document.getElementById('statusBadge').style.color = 'var(--green)';
+  document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+  // 核心指标卡
+  var core = [
+    { label: '📊 总请求', value: s.proxy.total_requests, cls: 'blue', sub: '' },
+    { label: '🔄 活跃流', value: s.proxy.active_streams, cls: s.proxy.active_streams > 0 ? 'green' : '', sub: '' },
+    { label: '⚡ 请求/分钟', value: s.proxy.requests_last_min, cls: '', sub: '' },
+    { label: '❌ 总错误', value: s.proxy.total_errors, cls: s.proxy.total_errors > 0 ? 'red' : 'green', sub: '' },
+    { label: '🔧 补丁应用', value: s.proxy.patch_applied, cls: s.proxy.patch_applied > 0 ? 'yellow' : '', sub: '成功' + s.proxy.patch_success + ' / 失败' + s.proxy.patch_failed },
+    { label: '💬 会话数', value: s.conversations.total, cls: 'blue', sub: s.conversations.with_errors + ' 个有错误' },
+  ];
+
+  var h = '';
+  core.forEach(function(c) {
+    h += '<div class="stat-card"><div class="label">' + c.label + '</div>';
+    h += '<div class="value ' + c.cls + '">' + c.value + '</div>';
+    if (c.sub) h += '<div class="sub">' + c.sub + '</div>';
+    h += '</div>';
+  });
+  document.getElementById('coreMetrics').innerHTML = h;
+
+  // 资源
+  var r = s.resources;
+  document.getElementById('resourceInfo').innerHTML =
+    'CPU: <strong>' + r.cpu_percent + '%</strong><br>' +
+    '内存: <strong>' + r.memory_used_mb + ' MB</strong> / ' + r.memory_total_mb + ' MB<br>' +
+    '磁盘空闲: <strong>' + r.disk_free_gb + ' GB</strong><br>' +
+    '线程: <strong>' + r.threads + '</strong> | 文件: <strong>' + r.open_files + '</strong><br>' +
+    '运行时间: <strong>' + formatUptime(s.server.uptime_seconds) + '</strong>';
+
+  // 上游
+   var u = s.upstream;
+   var cls2 = u.health && u.health.ok ? 'green' : 'red';
+   document.getElementById('upstreamInfo').innerHTML =
+     '地址: <strong>' + escHtml(u.url) + '</strong><br>' +
+     '连通性: <strong class="' + cls2 + '">' + (u.health && u.health.ok ? '✅ 正常' : '❌ 异常') + '</strong><br>' +
+     '延迟: <strong>' + (u.health ? u.health.latency_ms : '?') + 'ms</strong><br>' +
+     '状态码: <strong>' + (u.health ? u.health.status : '?') + '</strong>' +
+     (u.health && u.health.error ? '<br>错误: ' + escHtml(u.health.error) : '');
+
+  // 错误列表
+  var errs = s.recent_errors || [];
+  document.getElementById('errorCount').textContent = errs.length;
+  if (!errs.length) {
+    document.getElementById('errorList').innerHTML = '<div class="empty">暂无错误 ✅</div>';
+  } else {
+    var eh = '';
+    errs.reverse().forEach(function(e) {
+      eh += '<div class="error-item"><span class="time">' + (e.time || '').substring(11, 19) + '</span>' + escHtml(e.message) + '</div>';
+    });
+    document.getElementById('errorList').innerHTML = eh;
+  }
+}
+
+function formatUptime(s) {
+  if (s < 60) return s + '秒';
+  if (s < 3600) return Math.floor(s / 60) + '分' + (s % 60) + '秒';
+  var h = Math.floor(s / 3600);
+  var m = Math.floor((s % 3600) / 60);
+  return h + '小时' + m + '分';
+}
+
+function escHtml(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ─── 初始加载 ──────────────────────────────────────
+(function() {
+  var ak = sessionStorage.getItem('_ak');
+  if (!ak) {
+    // 尝试从 cookie 登录状态自动进入
+    document.getElementById('dashboard').style.display = 'block';
+  } else {
+    AUTH = ak;
+    document.getElementById('dashboard').style.display = 'block';
+  }
+  loadStatus();
+  startAuto();
+})();
+</script>
+</body>
+</html>
