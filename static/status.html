@@ -63,6 +63,24 @@
     </div>
   </div>
 
+  <!-- 导出日志 ZIP -->
+  <div class="card" style="margin-top:14px">
+    <div class="card-header"><h2>📦 导出日志</h2><span class="badge">ZIP</span></div>
+    <div class="log-toolbar">
+      <button class="btn btn-primary btn-sm" onclick="exportZip('all')">导出全部 ZIP</button>
+      <button class="btn btn-primary btn-sm" onclick="exportZip('suspect')">导出最近可疑 ZIP</button>
+      <button class="btn btn-primary btn-sm" onclick="exportZip('range')" id="btnRangeExport">按时间导出 ZIP</button>
+    </div>
+    <div class="field" style="margin-top:12px">
+      <label>开始时间</label>
+      <div class="input-wrap"><input type="datetime-local" id="logExportStart" step="1"></div>
+    </div>
+    <div class="field">
+      <label>结束时间</label>
+      <div class="input-wrap"><input type="datetime-local" id="logExportEnd" step="1"></div>
+    </div>
+  </div>
+
   <!-- 最近错误 -->
   <div class="card" style="margin-top:14px">
     <div class="card-header"><h2>⚠ 最近错误</h2><span class="badge" id="errorCount">0</span></div>
@@ -165,6 +183,31 @@ function formatUptime(s) {
 }
 
 function escHtml(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ─── 导出 ──────────────────────────────────────────
+async function exportZip(mode) {
+  var body = {};
+  if (mode === 'all') body.all = true;
+  else if (mode === 'suspect') body.last_suspect = true;
+  else {
+    var s = document.getElementById('logExportStart').value;
+    var e = document.getElementById('logExportEnd').value;
+    if (!s || !e) { alert('请选择开始和结束时间'); return; }
+    body.start = new Date(s).toISOString(); body.end = new Date(e).toISOString();
+  }
+  try {
+    var res = await fetch(API2 + '/api/admin/logs/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + AUTH },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { var er = await res.json(); throw new Error((er.error||{}).message || '导出失败'); }
+    var blob = await res.blob();
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a'); a.href = url;
+    a.download = 'api2cursor-logs-' + new Date().toISOString().slice(0,10) + '.zip';
+    a.click(); URL.revokeObjectURL(url);
+  } catch(e) { alert('导出失败: ' + e.message); }
+}
 
 // ─── 初始加载 ──────────────────────────────────────
 (function() {

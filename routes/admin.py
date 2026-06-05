@@ -47,13 +47,6 @@ def admin_page():
     return send_from_directory(_STATIC_DIR, 'admin.html')
 
 
-@bp.route('/admin/logs')
-@bp.route('/admin/logs/')
-def admin_logs_page():
-    """返回日志调试页。"""
-    return send_from_directory(_STATIC_DIR, 'admin_logs.html')
-
-
 @bp.route('/admin/conversations')
 @bp.route('/admin/conversations/')
 def admin_conversations_page():
