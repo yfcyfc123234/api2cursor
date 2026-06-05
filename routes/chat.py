@@ -242,8 +242,10 @@ def _handle_openai_stream(
 
     def generate():
         """消费上游 OpenAI SSE，并逐段产出给 Cursor 的聊天补全流。"""
+        import time as _t
+        _t_req = _t.time()
         attach_upstream_request(turn, payload, headers)
-        resp, err, patches, timing = forward_with_patches(
+        resp, err, patches, fwd = forward_with_patches(
             url, headers, payload,
             upstream_model=ctx.upstream_model, client_type='', stream=True,
         )
@@ -251,8 +253,11 @@ def _handle_openai_stream(
             turn['_patches_applied'] = [p['description'] for p in patches]
             pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), '')
             if pfid: turn['_matched_fix_id'] = pfid
-        if timing and turn: turn['_timing'] = timing
+        if fwd and turn:
+            fwd['proxy_prepare_ms'] = int((_t.time() - _t_req) * 1000) - fwd.get('upstream_ttfb_ms', 0)
+            turn['_timing'] = fwd
         if err:
+            if turn: turn['_timing']['total_ms'] = int((_t.time() - _t_req) * 1000)
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
             finalize_turn(turn)
@@ -263,16 +268,15 @@ def _handle_openai_stream(
         chunk_count = 0
         last_usage = None
         client_chunks: list[dict[str, Any]] = []
-        _t_req = _t.time()
-        _t_prev = _t_req
 
         for chunk in iter_openai_sse(resp):
-            if chunk_count == 0:
+            if chunk_count == 0 and turn and turn.get('_timing'):
                 turn['_timing']['stream_first_chunk_ms'] = int((_t.time() - _t_req) * 1000)
             if chunk is None:
                 _t_end = _t.time()
-                turn['_timing']['stream_total_ms'] = int((_t_end - _t_req) * 1000)
-                turn['_timing']['total_ms'] = int((_t_end - _t_req) * 1000)
+                if turn and turn.get('_timing'):
+                    turn['_timing']['stream_total_ms'] = int((_t_end - _t_req) * 1000)
+                    turn['_timing']['total_ms'] = int((_t_end - _t_req) * 1000)
                 _dbg(f'流式响应结束，共 {chunk_count} 个数据片段')
                 close_chunk = think_extractor.finalize()
                 if close_chunk:
