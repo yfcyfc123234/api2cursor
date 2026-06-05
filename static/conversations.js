@@ -476,7 +476,7 @@ async function fetchTurn(idx) {
     var newDoc = data.conversation;
     var fetchedTurn = newDoc.turns[0];
     currentDoc.turns[idx] = fetchedTurn;
-    if (newDoc._allTurnCount) currentDoc._allTurnCount = newDoc._allTurnCount;
+    if (newDoc._total_turns) currentDoc._allTurnCount = newDoc._total_turns;
     console.log('[前端] fetchTurn(%d) 耗时 %s ms', idx, apiMs);
     loadTurn(idx);
   } catch (e) {
