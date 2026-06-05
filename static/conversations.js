@@ -572,6 +572,11 @@ function renderMessages(turn) {
     html += renderErrorBubble(turn.error);
   }
 
+  // 3b. 修复标注（在错误消息下方显示）
+  if (turn.matched_fix_id || turn.fix_status) {
+    html += renderFixAnnotation(turn);
+  }
+
   // 4. 流式数据直接渲染（服务端已折叠为文本）
   var folded = turn.stream_trace && turn.stream_trace.folded;
   if (folded && (folded.content || folded.reasoning)) {
@@ -618,6 +623,11 @@ function renderMessages(turn) {
       html += ' | ⚠ 数据被截断（开启 VERBOSE_FULL_STREAM=1 可保留完整数据）';
     }
     html += '</div></div>';
+  }
+
+  // 非错误 turn 的修复标注
+  if (!turn.error && (turn.matched_fix_id || turn.fix_status)) {
+    html += renderFixAnnotation(turn);
   }
 
   html += '</div>';
@@ -824,6 +834,70 @@ function renderMarkdown(text) {
   }
   return '<pre style="white-space:pre-wrap;margin:0;font-family:inherit">' +
     escHtml(text) + '</pre>';
+}
+
+// ─── 修复标注缓存 ────────────────────────────────
+var errorFixesCache = null;
+async function loadErrorFixes() {
+  if (errorFixesCache) return errorFixesCache;
+  try {
+    var data = await api('/api/admin/error-fixes');
+    errorFixesCache = data.fixes || [];
+  } catch(e) {
+    errorFixesCache = [];
+  }
+  return errorFixesCache;
+}
+
+function renderFixAnnotation(turn) {
+  var fid = turn.matched_fix_id || '';
+  var fstatus = turn.fix_status || '';
+  if (!fid && !fstatus) return '';
+
+  var html = '<div class="chat-msg system">';
+  html += '<div class="chat-avatar">🔧</div>';
+  html += '<div class="chat-bubble" style="max-height:none;border-color:var(--yellow);background:rgba(234,179,8,.06)">';
+
+  // 状态
+  if (fstatus === 'fixed_success') {
+    html += '<strong style="color:var(--green)">✅ 修复生效</strong>';
+  } else if (fstatus === 'fixed_failed') {
+    html += '<strong style="color:var(--red)">❌ 修复失效</strong>';
+  } else if (fstatus === 'fixed_pending') {
+    html += '<strong style="color:var(--yellow)">⏳ 修复待验证</strong>';
+  } else {
+    html += '<strong style="color:var(--muted)">🔧 已匹配修复规则</strong>';
+  }
+
+  if (fid) {
+    html += '<br><span style="font-size:11px;color:var(--muted)">规则: ' + escHtml(fid) + '</span>';
+  }
+
+  // 异步加载修复详情
+  html += '<div id="fixDetail_' + escAttr(fid) + '" style="font-size:11px;color:var(--muted);margin-top:4px">加载修复详情…</div>';
+
+  html += '</div></div>';
+
+  // 异步加载
+  setTimeout(async function() {
+    var fixes = await loadErrorFixes();
+    var detail = '';
+    for (var i = 0; i < fixes.length; i++) {
+      if (fixes[i].id === fid) {
+        var f = fixes[i];
+        detail = '<strong>问题:</strong> ' + escHtml(f.problem || '?') + '<br>' +
+          '<strong>修复:</strong> ' + escHtml(f.fix_description || '?') + '<br>' +
+          '<strong>版本:</strong> ' + escHtml(f.fix_version || '?') +
+          ' | <strong>状态:</strong> ' + escHtml(f.status || '?');
+        break;
+      }
+    }
+    if (!detail) detail = '未找到修复规则详情';
+    var el = document.getElementById('fixDetail_' + fid);
+    if (el) el.innerHTML = detail;
+  }, 100);
+
+  return html;
 }
 
 /* ===== 对比视图 ===== */
