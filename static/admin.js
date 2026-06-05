@@ -423,14 +423,17 @@ async function copyMapping(name) {
   if (!m) { toast('映射不存在', false); return; }
   openAddModal();
   document.getElementById('modalTitle').textContent = '复制模型映射';
-  document.getElementById('mappingOriginalName').value = '';
-  document.getElementById('mappingName').value = name + '_copy';
-  document.getElementById('mappingUpstreamModel').value = m.upstream_model || name;
-  document.getElementById('mappingBackend').value = m.backend || 'auto';
-  document.getElementById('mappingTargetUrl').value = m.target_url || '';
-  document.getElementById('mappingApiKey').value = m.api_key || '';
-  document.getElementById('mappingInstructions').value = m.custom_instructions || '';
-  document.getElementById('mappingInstructionsPos').value = m.instructions_position || 'prepend';
+  document.getElementById('mName').value = name + '_copy';
+  document.getElementById('mUpstream').value = m.upstream_model || name;
+  document.getElementById('mBackend').value = m.backend || 'auto';
+  document.getElementById('mUrl').value = m.target_url || '';
+  document.getElementById('mKey').value = m.api_key || '';
+  document.getElementById('mInstructions').value = m.custom_instructions || '';
+  document.getElementById('mInsPosition').value = m.instructions_position || 'prepend';
+  var bm = m.body_modifications || {};
+  document.getElementById('mBodyMods').value = Object.keys(bm).length ? JSON.stringify(bm) : '';
+  var hm = m.header_modifications || {};
+  document.getElementById('mHeaderMods').value = Object.keys(hm).length ? JSON.stringify(hm) : '';
   editingName = null;
 }
 
