@@ -12,6 +12,8 @@ import logging
 import json
 import glob
 import queue
+import sys
+import time
 import threading
 import zipfile
 from datetime import datetime, timezone
@@ -1132,7 +1134,7 @@ _STATS = {
     'recent_errors': [],
 }
 _STATS_LOCK = threading.Lock()
-_last_min_counter = [0, time.time()]  # [count, window_start]
+_last_min_counter = [0, 0.0]  # [count, window_start]
 
 def record_request():
     with _STATS_LOCK:
