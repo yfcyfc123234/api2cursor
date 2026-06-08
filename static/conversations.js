@@ -565,13 +565,21 @@ function renderMessages(turn) {
 
   // 1. 渲染 client_request.messages
   var msgs = (turn.client_request && turn.client_request.messages) || [];
+  console.log('[前端] 开始渲染 ' + msgs.length + ' 条消息...');
+  var tBuild = performance.now();
+  var foldedCount = 0;
+  var totalChars = 0;
   msgs.forEach(function (msg, i) {
     try {
+      var c = msg.content;
+      if (typeof c === 'string') totalChars += c.length;
+      else if (Array.isArray(c)) c.forEach(function(p) { if (p.text) totalChars += p.text.length; });
       html += renderMessageBubble(msg, i);
     } catch(e) {
       console.error('[前端] renderMessageBubble msg[' + i + '] 出错:', e, msg);
     }
   });
+  console.log('[前端] HTML构建: ' + (performance.now() - tBuild).toFixed(0) + 'ms, 总字符: ' + totalChars + ', 折叠: ' + (totalChars > 3000 * msgs.length ? '是' : '否'));
 
   // 2. 如果有非流式响应，渲染
   if (turn.client_response && !turn.stream) {
@@ -650,9 +658,12 @@ function renderMessages(turn) {
   }
 
   html += '</div>';
+  var tDom = performance.now();
   chatEl.innerHTML = html;
+  console.log('[前端] DOM插入: ' + (performance.now() - tDom).toFixed(0) + 'ms');
 
   // 高亮代码块
+  var tHL = performance.now();
   if (typeof hljs !== 'undefined') {
     try {
       chatEl.querySelectorAll('pre code').forEach(function (block) {
@@ -687,7 +698,8 @@ function renderMessages(turn) {
     });
   });
 
-  console.log('[前端] 渲染消息 ' + msgs.length + ' 条, 耗时 ' + (performance.now() - t0).toFixed(0) + ' ms');
+  console.log('[前端] ═══ 总:' + (performance.now() - t0).toFixed(0) + 'ms 构建:' +
+    (tDom - t0).toFixed(0) + 'ms DOM:' + (performance.now() - tDom).toFixed(0) + 'ms ═══');
   } catch(e) {
     console.error('[前端] renderMessages 崩溃:', e);
   }
