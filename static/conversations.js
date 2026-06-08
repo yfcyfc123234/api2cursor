@@ -674,6 +674,19 @@ function renderMessages(turn) {
     });
   });
 
+  // 长消息折叠展开
+  chatEl.querySelectorAll('.fold-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function() {
+      var full = this.nextElementSibling;
+      var preview = this.previousElementSibling;
+      if (full.style.display === 'none' || !full.style.display) {
+        preview.style.display = 'none'; full.style.display = 'block'; this.textContent = '收起';
+      } else {
+        preview.style.display = 'block'; full.style.display = 'none'; this.textContent = '展开全文';
+      }
+    });
+  });
+
   console.log('[前端] 渲染消息 ' + msgs.length + ' 条, 耗时 ' + (performance.now() - t0).toFixed(0) + ' ms');
   } catch(e) {
     console.error('[前端] renderMessages 崩溃:', e);
@@ -730,7 +743,7 @@ function renderMessageBubble(msg, idx) {
 
   // 内容
   if (typeof content === 'string') {
-    html += '<div class="chat-bubble">' + renderMarkdown(content) + '</div>';
+    html += '<div class="chat-bubble">' + renderContent(content) + '</div>';
   } else if (Array.isArray(content)) {
     // 多模态内容
     var textParts = [];
@@ -750,7 +763,8 @@ function renderMessageBubble(msg, idx) {
         textParts.push('[' + (part.type || 'unknown') + ']');
       }
     });
-    html += '<div class="chat-bubble">' + renderMarkdown(textParts.join('\n\n')) + '</div>';
+    var joined = textParts.join('\n\n');
+    html += '<div class="chat-bubble">' + renderContent(joined) + '</div>';
   } else {
     html += '<div class="chat-bubble">' + escHtml(String(content || '')) + '</div>';
   }
@@ -828,6 +842,22 @@ function renderErrorBubble(error) {
   }
   html += '</div></div>';
   return html;
+}
+
+// 长消息折叠阈值
+var FOLD_LEN = 3000;
+
+function renderContent(text) {
+  if (!text) return '';
+  if (text.length <= FOLD_LEN) return renderMarkdown(text);
+  // 折叠：显示前 800 字符预览
+  var preview = text.substring(0, 800);
+  var previewHtml = renderMarkdown(preview);
+  var fullHtml = renderMarkdown(text);
+  var id = 'fold_' + Math.random().toString(36).substr(2, 8);
+  return '<div class="fold-preview" id="' + id + '_pre">' + previewHtml + '</div>' +
+    '<button class="fold-toggle btn btn-ghost btn-sm" style="margin:4px 0">展开全文 (' + text.length + ' 字符)</button>' +
+    '<div class="fold-full" id="' + id + '_full" style="display:none">' + fullHtml + '</div>';
 }
 
 function renderMarkdown(text) {
