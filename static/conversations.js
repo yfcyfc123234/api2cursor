@@ -438,7 +438,8 @@ async function openConversation(convId, date) {
 }
 
 function loadTurn(idx) {
-  console.time('[前端] 渲染Turn');
+  var _timerLabel = '[前端] 渲染Turn#' + idx;
+  console.time(_timerLabel);
   if (!currentDoc || !currentDoc.turns || !currentDoc.turns.length) {
     document.getElementById('chatMessages').innerHTML =
       '<div class="empty">该会话没有 turn 数据</div>';
@@ -463,7 +464,7 @@ function loadTurn(idx) {
 
   // 滚动到顶部
   document.getElementById('chatViewport').scrollTop = 0;
-  console.timeEnd('[前端] 渲染Turn');
+  console.timeEnd(_timerLabel);
 }
 
 async function fetchTurn(idx) {
