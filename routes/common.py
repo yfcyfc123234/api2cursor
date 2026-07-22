@@ -15,6 +15,7 @@ import settings
 from utils.http import build_anthropic_headers, build_gemini_headers, build_openai_headers
 
 logger = logging.getLogger(__name__)
+from utils.log_categories import log as cat_log
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class RouteContext:
     instructions_position: str
     body_modifications: dict
     header_modifications: dict
+    reasoning_to_content: bool = False  # 将上游 reasoning_content 复制到 content 供 Cursor 显示
 
 
 def build_route_context(client_model: str, is_stream: bool) -> RouteContext:
@@ -52,6 +54,7 @@ def build_route_context(client_model: str, is_stream: bool) -> RouteContext:
         instructions_position=mapping.get('instructions_position', 'prepend'),
         body_modifications=mapping.get('body_modifications', {}),
         header_modifications=mapping.get('header_modifications', {}),
+        reasoning_to_content=mapping.get('reasoning_to_content', False),
     )
 
 
@@ -103,7 +106,7 @@ def log_route_context(route_name: str, ctx: RouteContext, *, extra: str = '') ->
     ]
     if extra:
         parts.append(extra)
-    logger.info(' '.join(parts))
+    cat_log('proxy', ' '.join(parts))
 
 
 def log_usage(
@@ -140,6 +143,54 @@ def sse_event_message(event_type: str, data: Any) -> str:
 def chat_error_chunk(message: str, error_type: str = 'upstream_error') -> str:
     """构造聊天补全流式接口使用的错误消息。"""
     return sse_data_message({'error': {'message': message, 'type': error_type}})
+
+
+def format_upstream_error_for_cursor(error_str: str) -> str:
+    """将上游原始错误解析并格式化为 Cursor 可正确显示的 SSE 错误块。
+
+    当前 chat_error_chunk 会把上游 JSON 错误体直接塞进 message 字段，
+    导致 Cursor 端错误信息不可读。此函数尝试解析上游 JSON 并提取
+    有意义的错误消息，然后格式化为规范的 OpenAI 错误格式。
+    """
+    import json as _json
+
+    try:
+        # 错误格式: "上游错误 429: {...json...}"
+        json_start = error_str.find('{')
+        if json_start >= 0:
+            upstream_body = _json.loads(error_str[json_start:])
+            if isinstance(upstream_body, dict):
+                # Anthropic: {"type":"error","error":{"type":"...","message":"..."}}
+                # OpenAI:   {"error": {"message": "...", "type": "..."}}
+                inner = upstream_body.get('error', upstream_body)
+                if isinstance(inner, dict):
+                    message = inner.get('message', str(upstream_body))
+                    error_type = inner.get('type', 'upstream_error')
+                else:
+                    message = str(upstream_body)
+                    error_type = 'upstream_error'
+                return sse_data_message({
+                    'error': {
+                        'message': message,
+                        'type': error_type,
+                    }
+                })
+    except (_json.JSONDecodeError, ValueError, AttributeError):
+        pass
+
+    # Fallback: 尝试去掉 "上游错误 xxx: " 前缀
+    clean_msg = error_str
+    if error_str.startswith('上游错误'):
+        colon_idx = error_str.find(':')
+        if colon_idx > 0:
+            clean_msg = error_str[colon_idx + 1:].strip()
+
+    return sse_data_message({
+        'error': {
+            'message': clean_msg,
+            'type': 'upstream_error',
+        }
+    })
 
 
 def responses_error_event(message: str) -> str:
@@ -248,3 +299,104 @@ def apply_header_modifications(headers: dict[str, str], modifications: dict[str,
             headers[key] = str(value)
     logger.info('已应用 header_modifications: %s', list(modifications.keys()))
     return headers
+
+
+# 余额/资源包不足错误模式 —— 这类错误重试多少次都没用，直接放弃
+import re as _re
+_BILLING_RE = _re.compile(
+    r'1113|余额不足|无可用的资源包|insufficient_balance|insufficient_quota|billing',
+    _re.IGNORECASE,
+)
+
+
+def forward_with_patches(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    upstream_model: str = '',
+    client_type: str = '',
+    stream: bool = False,
+    max_retries: int = 2,
+):
+    """发送请求并自动打补丁重试。
+
+    当上游返回错误且 error_patcher 有匹配补丁时，自动修复并重试。
+    返回 (response, error, patch_logs, timing_dict)。
+    timing_dict 包含: upstream_start_ms, upstream_ttfb_ms, upstream_total_ms
+    """
+    import time as _time
+    from utils.http import forward_request
+    from utils.error_patcher import match as match_patches, apply as apply_patch
+
+    patches_applied = []
+    current_payload = payload
+    upstream_elapsed_ms = 0
+    upstream_ttfb_ms = 0
+    total_attempt_start = _time.time()
+
+    for attempt in range(max_retries + 1):
+        t0 = _time.time()
+        resp, err = forward_request(url, headers, current_payload, stream=stream)
+        upstream_elapsed_ms = int((_time.time() - t0) * 1000)
+        # TTFB: 对于非流式就是总耗时，对于流式连接建立就是 TTFB
+        upstream_ttfb_ms = upstream_elapsed_ms  # requests 库连接+响应头时间
+
+        if not err:
+            if patches_applied:
+                cat_log('patch', '[补丁] 重试成功 (尝试 %d 次, 补丁: %s)',
+                            attempt, ', '.join(p['name'] for p in patches_applied))
+            timing = {
+                'upstream_ttfb_ms': upstream_ttfb_ms,
+                'upstream_total_ms': upstream_elapsed_ms,
+                'attempts': attempt + 1,
+                'retries': attempt,
+            }
+            return resp, None, patches_applied, timing
+
+        # 最后一次尝试不重试
+        if attempt >= max_retries:
+            break
+
+        # 余额/资源包不足 —— 不可重试，直接放弃
+        error_str = str(err)
+        if _BILLING_RE.search(error_str):
+            cat_log('patch', '[补丁] 余额/资源包不足，放弃重试: %s', error_str[:200], level=logging.WARNING)
+            break
+
+        # 尝试匹配补丁
+        patches = match_patches(error_str, upstream_model, client_type)
+        if not patches:
+            break
+
+        # 只保留可重试的补丁；如果全不可重试则不重试
+        retryable_patches = [p for p in patches if p.get('retryable', True)]
+        if not retryable_patches:
+            cat_log('patch', '[补丁] 匹配到 %d 个补丁但均不可重试，放弃重试: %s',
+                        len(patches), error_str[:150])
+            break
+
+        patch_start = _time.time()
+        for patch in retryable_patches:
+            cat_log('patch', '[补丁] 匹配到错误: %s → 应用补丁: %s',
+                           error_str[:150], patch['description'], level=logging.WARNING)
+            try:
+                current_payload = apply_patch(current_payload, patch, error_str)
+                patches_applied.append(patch)
+            except Exception as e:
+                cat_log('patch', '[补丁] 应用失败: %s', e, level=logging.WARNING)
+        patch_ms = int((_time.time() - patch_start) * 1000)
+
+    # 所有重试都失败
+    if patches_applied:
+        cat_log('patch', '[补丁] 所有重试失败 (%d 次), 补丁: %s',
+                       len(patches_applied),
+                       ', '.join(p['name'] for p in patches_applied), level=logging.WARNING)
+    timing = {
+        'upstream_ttfb_ms': upstream_ttfb_ms,
+        'upstream_total_ms': upstream_elapsed_ms,
+        'attempts': max_retries + 1,
+        'retries': max_retries,
+        'patch_ms': patch_ms if patches_applied else 0,
+        'error': str(err)[:200],
+    }
+    return None, err, patches_applied, timing

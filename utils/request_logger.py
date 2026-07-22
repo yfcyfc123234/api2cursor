@@ -22,6 +22,7 @@ from settings import DATA_DIR
 import settings
 from utils.http import gen_id
 from utils import conversation_index
+from utils import conversation_store
 
 logger = logging.getLogger(__name__)
 
@@ -97,16 +98,25 @@ def _emit_live_event(*, kind: str, turn: dict[str, Any], payload: Any) -> None:
         'payload': _truncate_preview(payload),
     }
 
+    dead: list[queue.Queue] = []
     with _LIVE_SUBSCRIBERS_LOCK:
-        # 注意：不做深拷贝，payload 已经截断为字符串预览
         subscribers = list(_LIVE_SUBSCRIBERS)
 
     for q in subscribers:
         try:
             q.put_nowait(event)
         except queue.Full:
-            # 队列满则丢弃旧事件（不阻塞主线程）
-            pass
+            # 队列满 → 消费者可能已断开，累积失败后清理
+            fail_count = getattr(q, '_full_fail_count', 0) + 1
+            q._full_fail_count = fail_count  # type: ignore[attr-defined]
+            if fail_count >= 10:
+                dead.append(q)
+
+    if dead:
+        with _LIVE_SUBSCRIBERS_LOCK:
+            for q in dead:
+                _LIVE_SUBSCRIBERS.discard(q)
+        logger.warning('清理了 %d 个失效的 SSE 订阅者（队列持续满）', len(dead))
 
 
 def start_turn(
@@ -286,6 +296,15 @@ def finalize_turn(
     if stream_trace.get('upstream_dropped', 0) or stream_trace.get('client_dropped', 0):
         summary['truncated'] = True
 
+    # 流式结束统计
+    try:
+        from routes.admin import stream_ended, record_error, record_patch
+        stream_ended()
+        if turn.get('error'): record_error(str(turn['error'])[:200])
+        if turn.get('_patches_applied'): record_patch(not turn.get('error'))
+    except Exception:
+        pass
+
     threading.Thread(target=_write_turn, args=(deep_copy_jsonable(turn),), daemon=True).start()
     try:
         _emit_live_event(
@@ -364,6 +383,29 @@ def _write_turn(turn: dict[str, Any]) -> None:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(doc, f, ensure_ascii=False, indent=2, default=str)
             conversation_index.upsert_from_document(doc, filepath)
+
+            # 同时写入独立的 turn 文件，方便按需读取
+            turn_idx = len(turns) - 1
+            turn_filepath = os.path.join(day_dir, f'{conversation_id}_turn{turn_idx}.json')
+            turn_doc = {
+                'conversation_id': conversation_id,
+                'route': turn.get('route', ''),
+                'created_at': doc['created_at'],
+                'updated_at': turn['updated_at'],
+                '_current_turn': turn_idx,
+                '_total_turns': len(turns),
+                'last_client_model': turn.get('client_model', ''),
+                'last_backend': turn.get('backend', ''),
+                'turns': [turn],
+            }
+            with open(turn_filepath, 'w', encoding='utf-8') as f:
+                json.dump(turn_doc, f, ensure_ascii=False, indent=2, default=str)
+
+            # 同时写入 SQLite 数据库
+            try:
+                conversation_store.insert_turn(turn)
+            except Exception as e:
+                logger.warning('写入数据库失败: %s', e)
         except OSError as e:
             logger.warning('写入对话日志失败: %s', e)
         except json.JSONDecodeError as e:

@@ -33,6 +33,7 @@ from adapters.responses_cc_adapter import (
 )
 from config import Config
 from routes.common import (
+    forward_with_patches,
     RouteContext,
     apply_body_modifications,
     apply_header_modifications,
@@ -42,6 +43,8 @@ from routes.common import (
     build_responses_target,
     build_route_context,
     chat_error_chunk,
+    format_upstream_error_for_cursor,
+    forward_with_patches,
     inject_instructions_anthropic,
     inject_instructions_cc,
     inject_instructions_responses,
@@ -72,16 +75,16 @@ from utils.request_logger import (
 from utils.think_tag import ThinkTagExtractor
 from utils.thinking_cache import fold_chat_completion_stream_chunks, thinking_cache
 from utils.usage_tracker import usage_tracker
+from utils.log_categories import log as cat_log, is_enabled as cat_on
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint('chat', __name__)
 
 
-def _dbg(message: str) -> None:
-    """仅在调试模式下输出详细日志。"""
-    if settings.get_debug_mode() in ('simple', 'verbose'):
-        logger.info('[聊天补全调试] %s', message)
+def _dbg(message: str, category: str = 'stream') -> None:
+    """分类日志快捷方法。proxy 级别用 'proxy'，chunk 级别用 'stream'（默认）。"""
+    cat_log(category, message)
 
 
 def _remember_assistant_thinking_openai_stream(
@@ -134,7 +137,11 @@ def chat_completions():
     )
 
     log_route_context('聊天补全', ctx, extra=f'消息数={message_count}')
-    _log_messages(payload)
+    # 统计计数
+    from routes.admin import record_request, stream_started, stream_ended
+    record_request()
+    if is_stream: stream_started()
+    cat_log('proxy', '[请求] 模型=%s 流式=%s 消息=%d', ctx.client_model, is_stream, message_count)
 
     if ctx.backend != 'responses':
         payload['messages'] = thinking_cache.inject(payload.get('messages', []))
@@ -175,14 +182,16 @@ def _handle_openai_backend(ctx: RouteContext, payload: dict[str, Any], turn: dic
             {k: v for k, v in payload.items() if k != 'messages'},
             ensure_ascii=False,
             default=str,
-        )[:500]
+        )[:500],
+        'proxy',
     )
 
     payload = normalize_request(payload, ctx.upstream_model)
     payload = inject_instructions_cc(payload, ctx.custom_instructions, ctx.instructions_position)
     _dbg(
         f'标准化完成：模型={payload.get("model")} '
-        f'工具数={len(payload.get("tools", []))}'
+        f'工具数={len(payload.get("tools", []))}',
+        'proxy',
     )
 
     url, headers = build_openai_target(ctx)
@@ -204,15 +213,25 @@ def _handle_openai_non_stream(
     """处理 OpenAI 兼容后端的非流式返回。"""
     payload['stream'] = False
     attach_upstream_request(turn, payload, headers)
-    resp, err = forward_request(url, headers, payload)
+    resp, err, patches, timing = forward_with_patches(
+        url, headers, payload,
+        upstream_model=ctx.upstream_model, client_type='', stream=False,
+    )
+    if patches and turn:
+        turn['_patches_applied'] = [p['description'] for p in patches]
+        for p in patches:
+            if p.get('fix_id'):
+                turn['_matched_fix_id'] = p['fix_id']
+                break
+    if timing and turn: turn['_timing'] = timing
     if err:
-        attach_error(turn, {'stage': 'forward_request', 'message': 'upstream request failed'})
+        attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)
         return err
 
     raw = resp.json()
     attach_upstream_response(turn, raw)
-    _dbg('上游原始响应=' + json.dumps(raw, ensure_ascii=False, default=str)[:1000])
+    _dbg('上游原始响应=' + json.dumps(raw, ensure_ascii=False, default=str)[:1000], 'proxy')
 
     data = fix_response(raw)
     return _finalize_chat_response(ctx, data, turn=turn, debug_label='修复后响应')
@@ -230,28 +249,48 @@ def _handle_openai_stream(
 
     def generate():
         """消费上游 OpenAI SSE，并逐段产出给 Cursor 的聊天补全流。"""
+        import time as _t
+        _t_req = _t.time()
         attach_upstream_request(turn, payload, headers)
-        resp, err = forward_request(url, headers, payload, stream=True)
+        resp, err, patches, fwd = forward_with_patches(
+            url, headers, payload,
+            upstream_model=ctx.upstream_model, client_type='', stream=True,
+        )
+        if patches and turn:
+            turn['_patches_applied'] = [p['description'] for p in patches]
+            pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), '')
+            if pfid: turn['_matched_fix_id'] = pfid
+        if fwd and turn:
+            fwd['proxy_prepare_ms'] = int((_t.time() - _t_req) * 1000) - fwd.get('upstream_ttfb_ms', 0)
+            turn['_timing'] = fwd
         if err:
+            if turn: turn['_timing']['total_ms'] = int((_t.time() - _t_req) * 1000)
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
             finalize_turn(turn)
-            yield chat_error_chunk(str(err))
+            yield format_upstream_error_for_cursor(str(err))
             return
 
-        think_extractor = ThinkTagExtractor()
+        think_extractor = ThinkTagExtractor(enable_bridge=ctx.reasoning_to_content)
         chunk_count = 0
         last_usage = None
         client_chunks: list[dict[str, Any]] = []
 
         for chunk in iter_openai_sse(resp):
+            if chunk_count == 0 and turn and turn.get('_timing'):
+                turn['_timing']['stream_first_chunk_ms'] = int((_t.time() - _t_req) * 1000)
             if chunk is None:
-                _dbg(f'流式响应结束，共 {chunk_count} 个数据片段')
-                close_chunk = think_extractor.finalize()
-                if close_chunk:
-                    client_chunks.append(close_chunk)
-                    append_client_event(turn, {'type': 'chat_chunk', 'data': close_chunk})
-                    yield sse_data_message(close_chunk)
+                _t_end = _t.time()
+                if turn and turn.get('_timing'):
+                    turn['_timing']['stream_total_ms'] = int((_t_end - _t_req) * 1000)
+                    turn['_timing']['total_ms'] = int((_t_end - _t_req) * 1000)
+                _dbg(f'流式响应结束，共 {chunk_count} 个数据片段', 'proxy')
+                close_chunks = think_extractor.finalize()
+                for close_chunk in close_chunks:
+                    if close_chunk:
+                        client_chunks.append(close_chunk)
+                        append_client_event(turn, {'type': 'chat_chunk', 'data': close_chunk})
+                        yield sse_data_message(close_chunk)
                 append_client_event(turn, {'type': 'done'})
                 yield sse_data_message('[DONE]')
                 _remember_assistant_thinking_openai_stream(payload, client_chunks)
@@ -325,7 +364,8 @@ def _handle_responses_backend(ctx: RouteContext, payload: dict[str, Any], turn: 
     responses_payload = inject_instructions_responses(responses_payload, ctx.custom_instructions, ctx.instructions_position)
     _dbg(
         '已转换为 Responses 请求：字段=' + str(list(responses_payload.keys()))
-        + f' 输入项数={len(responses_payload.get("input", []))}'
+        + f' 输入项数={len(responses_payload.get("input", []))}',
+        'proxy',
     )
 
     url, headers = build_responses_target(ctx)
@@ -347,15 +387,18 @@ def _handle_responses_non_stream(
     """处理原生 Responses 后端的非流式返回。"""
     payload['stream'] = False
     attach_upstream_request(turn, payload, headers)
-    resp, err = forward_request(url, headers, payload)
+    resp, err, patches, timing = forward_with_patches(
+        url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
+    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
+    if timing and turn: turn['_timing'] = timing
     if err:
-        attach_error(turn, {'stage': 'forward_request', 'message': 'upstream request failed'})
+        attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)
         return err
 
     raw = resp.json()
     attach_upstream_response(turn, raw)
-    _dbg('上游原始响应=' + json.dumps(raw, ensure_ascii=False, default=str)[:1000])
+    _dbg('上游原始响应=' + json.dumps(raw, ensure_ascii=False, default=str)[:1000], 'proxy')
 
     data = responses_to_cc_response(raw, ctx.client_model)
     return _finalize_chat_response(ctx, data, turn=turn, debug_label='Responses 转回聊天补全后')
@@ -375,12 +418,15 @@ def _handle_responses_stream(
     def generate():
         """消费上游 Responses 事件，并实时转换成聊天补全 chunk。"""
         attach_upstream_request(turn, payload, headers)
-        resp, err = forward_request(url, headers, payload, stream=True)
+        resp, err, patches, timing = forward_with_patches(
+            url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=True)
+        if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
+        if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
             finalize_turn(turn)
-            yield chat_error_chunk(str(err))
+            yield format_upstream_error_for_cursor(str(err))
             return
 
         event_count = 0
@@ -415,7 +461,7 @@ def _handle_responses_stream(
 
             event_count += 1
 
-        _dbg(f'流式响应结束，共 {event_count} 个事件')
+        _dbg(f'流式响应结束，共 {event_count} 个事件', 'proxy')
         append_client_event(turn, {'type': 'done'})
         yield sse_data_message('[DONE]')
         usage_tracker.record(ctx.client_model, last_usage)
@@ -441,7 +487,8 @@ def _handle_gemini_backend(ctx: RouteContext, payload: dict[str, Any], turn: dic
     gemini_payload = cc_to_gemini_request(payload)
     _dbg(
         '已转换为 Gemini 请求：字段=' + str(list(gemini_payload.keys()))
-        + f' 内容数={len(gemini_payload.get("contents", []))}'
+        + f' 内容数={len(gemini_payload.get("contents", []))}',
+        'proxy',
     )
 
     url, headers = build_gemini_target(ctx, stream=ctx.is_stream)
@@ -462,15 +509,18 @@ def _handle_gemini_non_stream(
 ):
     """处理 Gemini 后端的非流式返回。"""
     attach_upstream_request(turn, payload, headers)
-    resp, err = forward_request(url, headers, payload)
+    resp, err, patches, timing = forward_with_patches(
+        url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
+    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
+    if timing and turn: turn['_timing'] = timing
     if err:
-        attach_error(turn, {'stage': 'forward_request', 'message': 'upstream request failed'})
+        attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)
         return err
 
     raw = resp.json()
     attach_upstream_response(turn, raw)
-    _dbg('上游原始响应=' + json.dumps(raw, ensure_ascii=False, default=str)[:1000])
+    _dbg('上游原始响应=' + json.dumps(raw, ensure_ascii=False, default=str)[:1000], 'proxy')
 
     data = gemini_to_cc_response(raw)
     return _finalize_chat_response(ctx, data, turn=turn, debug_label='Gemini 转回聊天补全后')
@@ -488,12 +538,15 @@ def _handle_gemini_stream(
 
     def generate():
         attach_upstream_request(turn, payload, headers)
-        resp, err = forward_request(url, headers, payload, stream=True)
+        resp, err, patches, timing = forward_with_patches(
+            url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=True)
+        if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
+        if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
             finalize_turn(turn)
-            yield chat_error_chunk(str(err))
+            yield format_upstream_error_for_cursor(str(err))
             return
 
         chunk_count = 0
@@ -556,7 +609,8 @@ def _handle_anthropic_backend(ctx: RouteContext, payload: dict[str, Any], turn: 
     anthropic_payload = inject_instructions_anthropic(anthropic_payload, ctx.custom_instructions, ctx.instructions_position)
     _dbg(
         '已转换为 Messages 请求：字段=' + str(list(anthropic_payload.keys()))
-        + f' 消息数={len(anthropic_payload.get("messages", []))}'
+        + f' 消息数={len(anthropic_payload.get("messages", []))}',
+        'proxy',
     )
 
     url, headers = build_anthropic_target(ctx)
@@ -578,15 +632,18 @@ def _handle_anthropic_non_stream(
     """处理 Anthropic 后端的非流式返回。"""
     payload['stream'] = False
     attach_upstream_request(turn, payload, headers)
-    resp, err = forward_request(url, headers, payload)
+    resp, err, patches, timing = forward_with_patches(
+        url, headers, payload, upstream_model=ctx.upstream_model, client_type='', stream=False)
+    if patches and turn: turn['_patches_applied'] = [p['description'] for p in patches]; pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), ''); turn['_matched_fix_id'] = pfid if pfid else turn.get('_matched_fix_id','')
+    if timing and turn: turn['_timing'] = timing
     if err:
-        attach_error(turn, {'stage': 'forward_request', 'message': 'upstream request failed'})
+        attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
         finalize_turn(turn)
         return err
 
     raw = resp.json()
     attach_upstream_response(turn, raw)
-    _dbg('上游原始响应=' + json.dumps(raw, ensure_ascii=False, default=str)[:1000])
+    _dbg('上游原始响应=' + json.dumps(raw, ensure_ascii=False, default=str)[:1000], 'proxy')
 
     data = messages_to_cc_response(raw)
     return _finalize_chat_response(ctx, data, turn=turn, debug_label='Messages 转回聊天补全后')
@@ -610,12 +667,20 @@ def _handle_anthropic_stream(
     def generate():
         """消费上游 Anthropic 事件流，并逐步映射为聊天补全 SSE。"""
         attach_upstream_request(turn, payload, headers)
-        resp, err = forward_request(url, headers, payload, stream=True)
+        resp, err, patches, timing = forward_with_patches(
+            url, headers, payload,
+            upstream_model=ctx.upstream_model, client_type='', stream=True,
+        )
+        if patches and turn:
+            turn['_patches_applied'] = [p['description'] for p in patches]
+            pfid = next((p.get('fix_id','') for p in patches if p.get('fix_id')), '')
+            if pfid: turn['_matched_fix_id'] = pfid
+        if timing and turn: turn['_timing'] = timing
         if err:
             attach_error(turn, {'stage': 'forward_request', 'message': str(err)})
             set_stream_summary(turn, {'status': 'error'})
             finalize_turn(turn)
-            yield chat_error_chunk(str(err))
+            yield format_upstream_error_for_cursor(str(err))
             return
 
         event_count = 0
@@ -667,7 +732,7 @@ def _handle_anthropic_stream(
 
             event_count += 1
 
-        _dbg(f'流式响应结束，共 {event_count} 个事件')
+        _dbg(f'流式响应结束，共 {event_count} 个事件', 'proxy')
         append_client_event(turn, {'type': 'done'})
         yield sse_data_message('[DONE]')
         usage_tracker.record(ctx.client_model, last_usage)
@@ -702,7 +767,7 @@ def _finalize_chat_response(
     - 输出统一令牌统计日志
     """
     data['model'] = ctx.client_model
-    _dbg(debug_label + '=' + json.dumps(data, ensure_ascii=False, default=str)[:1000])
+    _dbg(debug_label + '=' + json.dumps(data, ensure_ascii=False, default=str)[:1000], 'proxy')
     log_usage('聊天补全', data.get('usage', {}), input_key='prompt_tokens', output_key='completion_tokens')
 
     usage_tracker.record(ctx.client_model, data.get('usage'))

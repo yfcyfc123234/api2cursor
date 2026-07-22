@@ -13,7 +13,8 @@ from flask import Blueprint, request, jsonify
 
 import settings
 from config import Config
-from routes.common import apply_body_modifications, apply_header_modifications, inject_instructions_anthropic
+from routes.common import apply_body_modifications, apply_header_modifications, inject_instructions_anthropic, format_upstream_error_for_cursor
+from utils.log_categories import log as cat_log
 from utils.http import build_anthropic_headers, forward_request, sse_response
 from utils.request_logger import (
     append_client_event,
@@ -40,7 +41,7 @@ def messages_passthrough():
     model = payload.get('model', 'unknown')
     is_stream = payload.get('stream', False)
 
-    logger.info(f'[透传] model={model} 流式={is_stream}')
+    cat_log('proxy', f'[透传] model={model} 流式={is_stream}')
 
     mapping = settings.resolve_model(model)
     url_base = mapping['target_url']
@@ -95,7 +96,7 @@ def messages_passthrough():
                 attach_error(turn, {'stage': 'upstream_status', 'status_code': resp.status_code, 'message': body})
                 set_stream_summary(turn, {'status': 'error'})
                 finalize_turn(turn)
-                yield f'data: {json.dumps({"error": {"message": body, "type": "upstream_error"}})}\n\n'
+                yield format_upstream_error_for_cursor(f'上游错误 {resp.status_code}: {body}')
                 return
 
             summary = {'upstream_event_count': 0, 'client_event_count': 0}

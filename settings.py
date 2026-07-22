@@ -109,6 +109,7 @@ def resolve_model(model_name):
             'instructions_position': m.get('instructions_position') or 'prepend',
             'body_modifications': m.get('body_modifications') or {},
             'header_modifications': m.get('header_modifications') or {},
+            'reasoning_to_content': m.get('reasoning_to_content', False),
         }
 
     return {
@@ -120,6 +121,7 @@ def resolve_model(model_name):
         'instructions_position': 'prepend',
         'body_modifications': {},
         'header_modifications': {},
+        'reasoning_to_content': False,
     }
 
 

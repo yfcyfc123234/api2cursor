@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API 2 Cursor - 会话回放</title>
+  <link rel="stylesheet" href="/static/admin.css">
+  <link rel="stylesheet" href="/static/conversations.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="login">
+  <div class="login-card">
+    <h1>API 2 Cursor</h1>
+    <p>会话回放与分析</p>
+    <div class="field">
+      <label>ACCESS_API_KEY</label>
+      <div class="input-wrap">
+        <input type="password" id="loginKey" placeholder="请输入访问密钥" onkeydown="if(event.key==='Enter')doLogin()">
+        <button class="eye" onclick="togglePwd('loginKey')">&#128065;</button>
+      </div>
+    </div>
+    <button class="btn btn-primary btn-block" onclick="doLogin()">登 录</button>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="dashboard">
+  <header>
+    <div class="container inner">
+      <h1>API 2 Cursor - 会话回放</h1>
+      <div class="right">
+        <span class="status" id="statusBadge">已连接</span>
+        <button class="btn btn-ghost btn-sm" onclick="location.href='/admin'">管理面板</button>
+        <button class="btn btn-ghost btn-sm" onclick="location.href='/admin/status'">服务器状态</button>
+        <button class="btn btn-ghost btn-sm" onclick="doLogout()">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container conv-main">
+    <!-- 左侧：会话列表 -->
+    <aside class="conv-sidebar" id="convSidebar">
+      <div class="conv-sidebar-header">
+        <div class="field" style="margin:0">
+          <div class="input-wrap">
+            <input type="text" id="convSearch" placeholder="搜索 ID / 模型 / 路由…" oninput="onSearch()">
+          </div>
+        </div>
+        <div class="conv-toolbar">
+          <button class="btn btn-ghost btn-sm" onclick="loadConversationList()" title="刷新列表">&#x21bb; 刷新</button>
+          <button class="btn btn-ghost btn-sm" id="btnEditMode" onclick="toggleEditMode()">✏️ 编辑</button>
+          <button class="btn btn-ghost btn-sm" id="liveToggleBtn" onclick="toggleLiveUpdates()" title="实时更新">
+            <span id="liveDot" class="live-dot live-on"></span> 实时
+          </button>
+        </div>
+      </div>
+
+      <!-- 编辑模式操作栏 -->
+      <div class="conv-edit-bar" id="convEditBar" style="display:none">
+        <button class="btn btn-ghost btn-sm" onclick="selectAll()">☑ 全选</button>
+        <button class="btn btn-ghost btn-sm" id="btnBatchCopy" onclick="batchCopy()">📋 复制错误信息(0)</button>
+        <button class="btn btn-red btn-sm" id="btnBatchDelete" onclick="batchDelete()">🗑 批量删除(0)</button>
+        <button class="btn btn-ghost btn-sm" onclick="exitEditMode()">✖ 取消</button>
+      </div>
+
+      <!-- 筛选标签 -->
+      <div class="conv-filter-bar" id="convFilterBar">
+        <span class="filter-label">筛选:</span>
+        <button class="filter-tag" data-filter="has_error" onclick="toggleFilter('has_error')">⚠ 有错误</button>
+        <button class="filter-tag" data-filter="fixed_pending" onclick="toggleFilter('fixed_pending')">⏳ 待验证</button>
+        <button class="filter-tag" data-filter="fixed_success" onclick="toggleFilter('fixed_success')">✅ 修复成功</button>
+        <button class="filter-tag" data-filter="fixed_failed" onclick="toggleFilter('fixed_failed')">❌ 修复失败</button>
+        <button class="filter-tag" data-filter="no_error" onclick="toggleFilter('no_error')">✅ 正常</button>
+      </div>
+
+      <!-- 排序控制 -->
+      <div class="conv-sort-bar">
+        <span class="sort-label">排序：</span>
+        <button class="sort-btn active" data-sort="updated_at" onclick="setSort('updated_at')">
+          时间 <span class="sort-arrow"></span>
+        </button>
+        <button class="sort-btn" data-sort="last_client_model" onclick="setSort('last_client_model')">
+          模型 <span class="sort-arrow"></span>
+        </button>
+        <button class="sort-btn" data-sort="turn_count" onclick="setSort('turn_count')">
+          轮数 <span class="sort-arrow"></span>
+        </button>
+      </div>
+
+      <!-- 会话列表 -->
+      <div class="conv-list" id="convList">
+        <div class="empty">加载中…</div>
+      </div>
+    </aside>
+
+    <!-- 右侧：回放区域 -->
+    <section class="conv-viewer" id="convViewer">
+      <div class="viewer-empty" id="viewerEmpty">
+        <div class="empty-icon">&#x1F4AC;</div>
+        <h3>选择一条会话</h3>
+        <p>从左侧列表点击会话，查看 Cursor ↔ AI 服务器的完整交互过程</p>
+      </div>
+
+      <div class="viewer-content" id="viewerContent" style="display:none">
+        <!-- Turn 切换栏 -->
+        <div class="turn-bar" id="turnBar"></div>
+
+        <!-- 元数据摘要 -->
+        <div class="conv-meta" id="convMeta"></div>
+
+        <!-- 对比视图工具栏 -->
+        <div class="viewer-toolbar" id="viewerToolbar">
+          <button class="btn btn-ghost btn-sm" id="btnContrast" onclick="toggleContrast()">
+            &#x25B3; 对比视图
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick="copyConversation()">&#x1F4CB; 复制对话</button>
+          <button class="btn btn-ghost btn-sm" onclick="scrollToBottom()">&#x2193; 底部</button>
+        </div>
+
+        <!-- 对比视图（默认隐藏） -->
+        <div class="contrast-panel" id="contrastPanel" style="display:none">
+          <div class="contrast-left">
+            <div class="contrast-label">&#x1F4E4; Cursor 原始请求</div>
+            <pre class="contrast-pre" id="contrastClient"></pre>
+          </div>
+          <div class="contrast-divider"></div>
+          <div class="contrast-right">
+            <div class="contrast-label">&#x1F4E8; 代理转发请求</div>
+            <pre class="contrast-pre" id="contrastUpstream"></pre>
+          </div>
+        </div>
+
+        <!-- 聊天回放区域 -->
+        <div class="chat-viewport" id="chatViewport">
+          <div class="chat-messages" id="chatMessages"></div>
+        </div>
+
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast-area" id="toasts"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="/static/conversations.js?v=14"></script>
+</body>
+</html>

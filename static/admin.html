@@ -31,7 +31,8 @@
       <h1>API 2 Cursor</h1>
       <div class="right">
         <span class="status" id="statusBadge">已连接</span>
-        <button class="btn btn-ghost btn-sm" onclick="location.href='/admin/logs'">日志调试</button>
+        <button class="btn btn-ghost btn-sm" onclick="location.href='/admin/conversations'">会话回放</button>
+        <button class="btn btn-ghost btn-sm" onclick="location.href='/admin/status'">服务器状态</button>
         <button class="btn btn-ghost btn-sm" onclick="doLogout()">退出</button>
       </div>
     </div>
@@ -210,6 +211,16 @@
       <div class="hint">前置：自定义指令放在系统提示词最前面，模型优先看到；后置：放在末尾</div>
     </div>
     <div class="field">
+    <div class="field">
+      <label>
+        <input type="checkbox" id="mReasoningToContent" style="width:auto;margin-right:6px">
+        思考内容桥接 <span style="color:var(--muted)">（reasoning → content）</span>
+      </label>
+      <div class="hint">
+        将上游返回的 <code>reasoning_content</code> 复制一份到 <code>content</code> 字段。
+        开启后 Cursor 才能显示 DeepSeek 等模型的思考过程。仅 OpenAI 兼容后端生效。
+      </div>
+    </div>
       <label>Body 修改 <span style="color:var(--muted)">（可选，JSON 格式）</span></label>
       <div class="input-wrap"><textarea id="mBodyMods" rows="3" placeholder='例: {"reasoning_effort": "high", "stream_options": null}' style="resize:vertical;min-height:60px;font-family:Consolas,Monaco,monospace;font-size:13px"></textarea></div>
       <div class="hint">

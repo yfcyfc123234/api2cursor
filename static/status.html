@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API 2 Cursor - 服务器状态</title>
+<link rel="stylesheet" href="/static/admin.css">
+<style>
+.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.stat-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.stat-card .value { font-size: 28px; font-weight: 700; }
+.stat-card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.value.green { color: var(--green); }
+.value.red { color: var(--red); }
+.value.yellow { color: var(--yellow); }
+.value.blue { color: var(--primary); }
+.row { display: flex; gap: 14px; flex-wrap: wrap; }
+.row > * { flex: 1; min-width: 300px; }
+.error-item { font-size: 11px; padding: 4px 0; border-bottom: 1px solid var(--border); font-family: monospace; }
+.error-item .time { color: var(--muted); margin-right: 8px; }
+.refresh-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; font-size: 13px; color: var(--muted); }
+.refresh-bar .auto { display: flex; align-items: center; gap: 4px; }
+#lastUpdate { font-family: monospace; }
+.nav-link { font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="dashboard">
+<header>
+  <div class="container inner">
+    <h1>API 2 Cursor - 服务器状态</h1>
+    <div class="right">
+      <span class="status" id="statusBadge">运行中</span>
+      <button class="btn btn-ghost btn-sm" onclick="location.href='/admin'">管理面板</button>
+      <button class="btn btn-ghost btn-sm" onclick="location.href='/admin/conversations'">会话回放</button>
+      <button class="btn btn-ghost btn-sm" onclick="location.href='/admin/logs'">日志面板</button>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+  <div class="refresh-bar">
+    <span>上次更新: <strong id="lastUpdate">-</strong></span>
+    <label class="auto"><input type="checkbox" id="autoRefresh" checked onchange="toggleAuto()"> 自动刷新</label>
+    <span>(5秒)</span>
+    <button class="btn btn-ghost btn-sm" onclick="loadStatus()">🔄 立即刷新</button>
+  </div>
+
+  <!-- 核心指标 -->
+  <div class="status-grid" id="coreMetrics"></div>
+
+  <div class="row">
+    <!-- 资源使用 -->
+    <div class="stat-card">
+      <div class="label">💻 系统资源</div>
+      <div id="resourceInfo" style="font-size:14px;line-height:2">加载中...</div>
+    </div>
+    <!-- 上游状态 -->
+    <div class="stat-card">
+      <div class="label">🔗 上游连接</div>
+      <div id="upstreamInfo" style="font-size:14px;line-height:2">加载中...</div>
+    </div>
+  </div>
+
+  <!-- 实时日志 -->
+  <div class="card" style="margin-top:14px">
+    <div class="card-header">
+      <h2>📜 实时日志</h2>
+      <div style="display:flex;gap:6px;align-items:center">
+        <span class="badge" id="logStatus">连接中...</span>
+        <button class="btn btn-ghost btn-sm" onclick="clearLogs()">清空</button>
+        <button class="btn btn-ghost btn-sm" id="btnLogPause" onclick="toggleLogPause()">暂停</button>
+        <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:2px">
+          <input type="checkbox" id="logFilterError" onchange="applyLogFilter()">仅错误</label>
+      </div>
+    </div>
+    <div id="logPane" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;height:320px;overflow-y:auto;padding:6px 10px;font-family:Consolas,Monaco,monospace;font-size:11px;line-height:1.6"></div>
+  </div>
+
+  <!-- 导出日志 ZIP -->
+  <div class="card" style="margin-top:14px">
+    <div class="card-header"><h2>📦 导出日志</h2><span class="badge">ZIP</span></div>
+    <div class="log-toolbar">
+      <button class="btn btn-primary btn-sm" onclick="exportZip('all')">导出全部 ZIP</button>
+      <button class="btn btn-primary btn-sm" onclick="exportZip('suspect')">导出最近可疑 ZIP</button>
+      <button class="btn btn-primary btn-sm" onclick="exportZip('range')" id="btnRangeExport">按时间导出 ZIP</button>
+    </div>
+    <div class="field" style="margin-top:12px">
+      <label>开始时间</label>
+      <div class="input-wrap"><input type="datetime-local" id="logExportStart" step="1"></div>
+    </div>
+    <div class="field">
+      <label>结束时间</label>
+      <div class="input-wrap"><input type="datetime-local" id="logExportEnd" step="1"></div>
+    </div>
+  </div>
+
+  <!-- 最近错误 -->
+  <div class="card" style="margin-top:14px">
+    <div class="card-header"><h2>⚠ 最近错误</h2><span class="badge" id="errorCount">0</span></div>
+    <div id="errorList" style="max-height:260px;overflow-y:auto;font-size:12px"><div class="empty">暂无错误</div></div>
+  </div>
+</main>
+</div>
+
+<script>
+var API2 = '';
+var AUTH = sessionStorage.getItem('_ak') || '';
+
+function api2(path) {
+  var h = { 'Content-Type': 'application/json' };
+  if (AUTH) h['Authorization'] = 'Bearer ' + AUTH;
+  return fetch(API2 + path, { headers: h }).then(function(r) { return r.json(); });
+}
+
+function toggleAuto() {
+  if (document.getElementById('autoRefresh').checked) startAuto();
+  else stopAuto();
+}
+
+var timer = null;
+function startAuto() { stopAuto(); timer = setInterval(loadStatus, 5000); }
+function stopAuto() { if (timer) { clearInterval(timer); timer = null; } }
+
+function loadStatus() {
+  api2('/api/admin/server-status').then(renderStatus).catch(function(e) {
+    document.getElementById('statusBadge').textContent = '离线';
+    document.getElementById('statusBadge').style.background = 'rgba(239,68,68,.15)';
+    document.getElementById('statusBadge').style.color = 'var(--red)';
+  });
+}
+
+function renderStatus(s) {
+  document.getElementById('statusBadge').textContent = '运行中';
+  document.getElementById('statusBadge').style.background = 'rgba(34,197,94,.15)';
+  document.getElementById('statusBadge').style.color = 'var(--green)';
+  document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+  // 核心指标卡
+  var core = [
+    { label: '📊 总请求', value: s.proxy.total_requests, cls: 'blue', sub: '' },
+    { label: '🔄 活跃流', value: s.proxy.active_streams, cls: s.proxy.active_streams > 0 ? 'green' : '', sub: '' },
+    { label: '⚡ 请求/分钟', value: s.proxy.requests_last_min, cls: '', sub: '' },
+    { label: '❌ 总错误', value: s.proxy.total_errors, cls: s.proxy.total_errors > 0 ? 'red' : 'green', sub: '' },
+    { label: '🔧 补丁应用', value: s.proxy.patch_applied, cls: s.proxy.patch_applied > 0 ? 'yellow' : '', sub: '成功' + s.proxy.patch_success + ' / 失败' + s.proxy.patch_failed },
+    { label: '💬 会话数', value: s.conversations.total, cls: 'blue', sub: s.conversations.with_errors + ' 个有错误' },
+  ];
+
+  var h = '';
+  core.forEach(function(c) {
+    h += '<div class="stat-card"><div class="label">' + c.label + '</div>';
+    h += '<div class="value ' + c.cls + '">' + c.value + '</div>';
+    if (c.sub) h += '<div class="sub">' + c.sub + '</div>';
+    h += '</div>';
+  });
+  document.getElementById('coreMetrics').innerHTML = h;
+
+  // 资源
+  var r = s.resources;
+  var memPct = r.memory_total_mb > 0 ? (r.memory_used_mb / r.memory_total_mb * 100).toFixed(1) : 0;
+  document.getElementById('resourceInfo').innerHTML =
+    'CPU: <strong>' + r.cpu_percent + '%</strong><br>' +
+    '内存: <strong>' + r.memory_used_mb + ' MB</strong> / ' + r.memory_total_mb + ' MB (' + memPct + '%)<br>' +
+    '磁盘空闲: <strong>' + r.disk_free_gb + ' GB</strong> (已用 ' + (r.disk_used_percent || '?') + '%)<br>' +
+    '线程: <strong>' + r.threads + '</strong> | 文件: <strong>' + (r.open_files != null ? r.open_files : '?') + '</strong><br>' +
+    '运行时间: <strong>' + formatUptime(s.server.uptime_seconds) + '</strong>';
+
+  // 上游
+   var u = s.upstream;
+   var cls2 = u.health && u.health.ok ? 'green' : 'red';
+   document.getElementById('upstreamInfo').innerHTML =
+     '地址: <strong>' + escHtml(u.url) + '</strong><br>' +
+     '连通性: <strong class="' + cls2 + '">' + (u.health && u.health.ok ? '✅ 正常' : '❌ 异常') + '</strong><br>' +
+     '延迟: <strong>' + (u.health ? u.health.latency_ms : '?') + 'ms</strong><br>' +
+     '状态码: <strong>' + (u.health ? u.health.status : '?') + '</strong>' +
+     (u.health && u.health.error ? '<br>错误: ' + escHtml(u.health.error) : '');
+
+  // 错误列表
+  var errs = s.recent_errors || [];
+  document.getElementById('errorCount').textContent = errs.length;
+  if (!errs.length) {
+    document.getElementById('errorList').innerHTML = '<div class="empty">暂无错误 ✅</div>';
+  } else {
+    var eh = '';
+    errs.reverse().forEach(function(e) {
+      eh += '<div class="error-item"><span class="time">' + (e.time || '').substring(11, 19) + '</span>' + escHtml(e.message) + '</div>';
+    });
+    document.getElementById('errorList').innerHTML = eh;
+  }
+}
+
+function formatUptime(s) {
+  if (s < 60) return s + '秒';
+  if (s < 3600) return Math.floor(s / 60) + '分' + (s % 60) + '秒';
+  var h = Math.floor(s / 3600);
+  var m = Math.floor((s % 3600) / 60);
+  return h + '小时' + m + '分';
+}
+
+function escHtml(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ─── 实时日志 ──────────────────────────────────────
+var logPaused = false;
+var logLines = [];
+var logEs = null;
+var logMaxLines = 300;
+
+function connectLogStream() {
+  if (logEs) { try { logEs.close(); } catch(e) {} }
+  var url = '/api/admin/logs/live-stream' + (AUTH ? '?key=' + encodeURIComponent(AUTH) : '');
+  logEs = new EventSource(url);
+  logEs.onmessage = function(e) {
+    if (logPaused) return;
+    try {
+      var d = JSON.parse(e.data);
+      if (d.type === 'log' && d.entry) appendLogLine(d.entry);
+      else if (d.type === 'hello') document.getElementById('logStatus').textContent = '已连接';
+      else if (d.type === 'ping') document.getElementById('logStatus').textContent = '已连接';
+    } catch(er) {}
+  };
+  logEs.onerror = function() { document.getElementById('logStatus').textContent = '已断开'; };
+  logEs.onopen = function() { document.getElementById('logStatus').textContent = '已连接'; };
+}
+
+function appendLogLine(entry) {
+  logLines.push(entry);
+  if (logLines.length > logMaxLines) logLines = logLines.slice(-logMaxLines);
+  if (document.getElementById('logFilterError').checked && entry.level !== 'ERROR') return;
+  var el = document.getElementById('logPane');
+  var color = entry.level === 'ERROR' ? '#ef4444' : entry.level === 'WARNING' ? '#eab308' : entry.level === 'INFO' ? '#e2e8f0' : '#8899ab';
+  var div = document.createElement('div');
+  div.innerHTML = '<span style="color:#666">' + entry.ts + '.' +
+    String(entry.ms).padStart(3,'0') + '</span> ' +
+    '<span style="color:' + color + ';margin-right:4px">' + entry.level + '</span> ' +
+    '<span style="color:#666">[' + escHtml(entry.name) + ']</span> ' +
+    '<span>' + escHtml(entry.msg) + '</span>';
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  // 限制 DOM 行数
+  while (el.children.length > logMaxLines) el.firstChild.remove();
+}
+
+function clearLogs() { var el = document.getElementById('logPane'); el.innerHTML = ''; logLines = []; }
+function toggleLogPause() {
+  logPaused = !logPaused;
+  document.getElementById('btnLogPause').textContent = logPaused ? '继续' : '暂停';
+}
+function applyLogFilter() {
+  var el = document.getElementById('logPane'); el.innerHTML = '';
+  var onlyErr = document.getElementById('logFilterError').checked;
+  logLines.forEach(function(entry) {
+    if (onlyErr && entry.level !== 'ERROR') return;
+    appendLogLine(entry);
+  });
+}
+
+// ─── 导出 ──────────────────────────────────────────
+async function exportZip(mode) {
+  var body = {};
+  if (mode === 'all') body.all = true;
+  else if (mode === 'suspect') body.last_suspect = true;
+  else {
+    var s = document.getElementById('logExportStart').value;
+    var e = document.getElementById('logExportEnd').value;
+    if (!s || !e) { alert('请选择开始和结束时间'); return; }
+    body.start = new Date(s).toISOString(); body.end = new Date(e).toISOString();
+  }
+  try {
+    var res = await fetch(API2 + '/api/admin/logs/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + AUTH },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { var er = await res.json(); throw new Error((er.error||{}).message || '导出失败'); }
+    var blob = await res.blob();
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a'); a.href = url;
+    a.download = 'api2cursor-logs-' + new Date().toISOString().slice(0,10) + '.zip';
+    a.click(); URL.revokeObjectURL(url);
+  } catch(e) { alert('导出失败: ' + e.message); }
+}
+
+// ─── 初始加载 ──────────────────────────────────────
+(function() {
+  var ak = sessionStorage.getItem('_ak');
+  if (!ak) {
+    // 尝试从 cookie 登录状态自动进入
+    document.getElementById('dashboard').style.display = 'block';
+  } else {
+    AUTH = ak;
+    document.getElementById('dashboard').style.display = 'block';
+  }
+  loadStatus();
+  startAuto();
+  connectLogStream();
+})();
+</script>
+</body>
+</html>

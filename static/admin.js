@@ -406,6 +406,7 @@ async function loadMappings() {
         </div>
         <div class="mapping-actions">
           <button class="btn btn-ghost btn-sm" onclick="openEditModal('${esc(name)}')">编辑</button>
+          <button class="btn btn-ghost btn-sm" onclick="copyMapping('${esc(name)}')">复制</button>
           <button class="btn btn-red btn-sm" onclick="deleteMapping('${esc(name)}')">删除</button>
         </div>
       </div>
@@ -416,6 +417,27 @@ async function loadMappings() {
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 // ─── 弹窗 ──────────────────────────────────────────
+async function copyMapping(name) {
+  var mappings = await api('/api/admin/mappings');
+  var m = mappings[name];
+  if (!m) { toast('映射不存在', false); return; }
+  openAddModal();
+  document.getElementById('modalTitle').textContent = '复制模型映射';
+  document.getElementById('mName').value = name + '_copy';
+  document.getElementById('mUpstream').value = m.upstream_model || name;
+  document.getElementById('mBackend').value = m.backend || 'auto';
+  document.getElementById('mUrl').value = m.target_url || '';
+  document.getElementById('mKey').value = m.api_key || '';
+  document.getElementById('mInstructions').value = m.custom_instructions || '';
+  document.getElementById('mInsPosition').value = m.instructions_position || 'prepend';
+  var bm = m.body_modifications || {};
+  document.getElementById('mBodyMods').value = Object.keys(bm).length ? JSON.stringify(bm) : '';
+  var hm = m.header_modifications || {};
+  document.getElementById('mHeaderMods').value = Object.keys(hm).length ? JSON.stringify(hm) : '';
+  document.getElementById('mReasoningToContent').checked = !!m.reasoning_to_content;
+  editingName = null;
+}
+
 function openAddModal() {
   editingName = null;
   document.getElementById('modalTitle').textContent = '添加模型映射';
@@ -429,6 +451,7 @@ function openAddModal() {
   document.getElementById('mInsPosition').value = 'prepend';
   document.getElementById('mBodyMods').value = '';
   document.getElementById('mHeaderMods').value = '';
+  document.getElementById('mReasoningToContent').checked = false;
   document.getElementById('modal').classList.add('active');
 }
 
@@ -449,6 +472,7 @@ async function openEditModal(name) {
     document.getElementById('mInsPosition').value = m.instructions_position || 'prepend';
     document.getElementById('mBodyMods').value = m.body_modifications && Object.keys(m.body_modifications).length ? JSON.stringify(m.body_modifications, null, 2) : '';
     document.getElementById('mHeaderMods').value = m.header_modifications && Object.keys(m.header_modifications).length ? JSON.stringify(m.header_modifications, null, 2) : '';
+    document.getElementById('mReasoningToContent').checked = !!m.reasoning_to_content;
     document.getElementById('modal').classList.add('active');
   } catch (e) {
     toast('错误: ' + e.message, false);
@@ -490,6 +514,7 @@ async function saveMapping() {
     instructions_position: document.getElementById('mInsPosition').value,
     body_modifications: bodyMods,
     header_modifications: headerMods,
+    reasoning_to_content: document.getElementById('mReasoningToContent').checked,
   };
 
   try {

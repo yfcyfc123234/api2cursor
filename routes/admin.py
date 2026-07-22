@@ -12,6 +12,8 @@ import logging
 import json
 import glob
 import queue
+import sys
+import time
 import threading
 import zipfile
 from datetime import datetime, timezone
@@ -26,6 +28,7 @@ from utils.http import sse_response
 from routes.common import sse_data_message
 from utils import request_logger as request_logger_mod
 from utils import conversation_index as conv_idx
+from utils import conversation_store
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +47,11 @@ def admin_page():
     return send_from_directory(_STATIC_DIR, 'admin.html')
 
 
-@bp.route('/admin/logs')
-@bp.route('/admin/logs/')
-def admin_logs_page():
-    """返回日志调试页。"""
-    return send_from_directory(_STATIC_DIR, 'admin_logs.html')
+@bp.route('/admin/conversations')
+@bp.route('/admin/conversations/')
+def admin_conversations_page():
+    """返回会话回放分析页。"""
+    return send_from_directory(_STATIC_DIR, 'conversations.html')
 
 
 @bp.route('/static/<path:filename>')
@@ -393,8 +396,43 @@ def _save_log_notes(notes: dict[str, Any]) -> None:
             json.dump(notes, f, ensure_ascii=False, indent=2)
 
 
+# ─── SSE 临时 token（避免主密钥出现在 URL 中）──────────────────
+_SSE_TOKENS: dict[str, float] = {}  # token → expiry_timestamp
+_SSE_TOKENS_LOCK = threading.Lock()
+_SSE_TOKEN_TTL = 300  # 5 分钟
+
+
+def _generate_sse_token() -> str:
+    """生成一个有时效的临时 token，用于 SSE 连接鉴权。"""
+    import secrets
+    tok = 'sse_' + secrets.token_urlsafe(24)
+    with _SSE_TOKENS_LOCK:
+        _SSE_TOKENS[tok] = time.time() + _SSE_TOKEN_TTL
+        # 清理过期 token
+        now = time.time()
+        expired = [k for k, v in _SSE_TOKENS.items() if v < now]
+        for k in expired:
+            del _SSE_TOKENS[k]
+    return tok
+
+
+def _validate_sse_token(token: str) -> bool:
+    """验证临时 SSE token 是否有效。"""
+    with _SSE_TOKENS_LOCK:
+        expiry = _SSE_TOKENS.get(token, 0)
+        if expiry > time.time():
+            return True
+        _SSE_TOKENS.pop(token, None)
+        return False
+
+
 def _check_auth_with_query_key() -> Any | None:
-    """Admin API 鉴权：优先支持 query key（用于 EventSource 无自定义 header 场景）。"""
+    """Admin API 鉴权：优先支持 query key（用于 EventSource 无自定义 header 场景）。
+
+    支持两种方式：
+    1. 主密钥（Authorization header / x-api-key header / ?key= 参数）
+    2. 临时 SSE token（仅 ?key= 参数，5 分钟有效，URL 泄露后影响有限）
+    """
     if not Config.ACCESS_API_KEY:
         return None
     token = request.args.get('key', '') or request.headers.get('Authorization', '')
@@ -402,9 +440,14 @@ def _check_auth_with_query_key() -> Any | None:
         token = token[7:]
     if not token:
         token = request.headers.get('x-api-key', '')
-    if token != Config.ACCESS_API_KEY:
-        return jsonify({'error': '未授权'}), 401
-    return None
+
+    # 优先匹配主密钥
+    if token == Config.ACCESS_API_KEY:
+        return None
+    # 其次匹配临时 SSE token（仅对 SSE 接口有效）
+    if token.startswith('sse_') and _validate_sse_token(token):
+        return None
+    return jsonify({'error': '未授权'}), 401
 
 
 def _find_conversation_file(conversation_id: str, date: str | None = None) -> str | None:
@@ -689,12 +732,35 @@ def logs_export_zip():
     )
 
 
+@bp.route('/api/admin/sse-token', methods=['POST'])
+def get_sse_token():
+    """用主密钥换取临时 SSE token（避免主密钥出现在 URL query string 中）。
+
+    POST /api/admin/sse-token
+    Authorization: Bearer <主密钥>
+
+    返回: {"token": "sse_xxxxx", "expires_in": 300}
+    """
+    err = _check_auth()
+    if err:
+        return err
+    tok = _generate_sse_token()
+    return jsonify({'token': tok, 'expires_in': _SSE_TOKEN_TTL})
+
+
 @bp.route('/api/admin/logs/live', methods=['GET'])
 def logs_live_sse():
-    """实时推送 verbose 模式下的 request/response 日志事件。"""
+    """实时推送 verbose 模式下的 request/response 日志事件。
+
+    Query 参数:
+      ?filter=turn    只推送 turn_started / turn_done（减少 99% 流量，推荐前端使用）
+                      不加此参数则推送全部事件（调试用）
+    """
     err = _check_auth_with_query_key()
     if err:
         return err
+
+    event_filter = (request.args.get('filter') or '').strip()
 
     def gen():
         q = request_logger_mod.register_live_subscriber()
@@ -706,6 +772,11 @@ def logs_live_sse():
                 except queue.Empty:
                     yield sse_data_message({'type': 'ping'})
                     continue
+                # ?filter=turn 模式：只推送前端实际需要的 turn 事件
+                if event_filter == 'turn':
+                    kind = evt.get('kind', '')
+                    if kind not in ('turn_started', 'turn_done'):
+                        continue
                 yield sse_data_message(evt)
         finally:
             request_logger_mod.unregister_live_subscriber(q)
@@ -715,23 +786,24 @@ def logs_live_sse():
 
 @bp.route('/api/admin/logs/count', methods=['GET'])
 def logs_count():
-    """返回与「清空历史」相同规则下的会话 JSON 文件数量，供前端判断是否可清空。"""
+    """返回会话数量，优先从数据库读取。"""
     err = _check_auth()
     if err:
         return err
-
-    n_idx = conv_idx.count_rows()
-    if n_idx is not None:
-        return jsonify({'count': n_idx})
-    n = 0
-    if os.path.isdir(_LOG_DIR):
-        n = len(glob.glob(os.path.join(_LOG_DIR, '*', '*.json')))
-    return jsonify({'count': n})
+    try:
+        n = conversation_store.get_conversation_count()
+    except Exception:
+        n = conv_idx.count_rows()
+        if n is None and os.path.isdir(_LOG_DIR):
+            n = len(glob.glob(os.path.join(_LOG_DIR, '*', '*.json')))
+    return jsonify({'count': n or 0})
 
 
 @bp.route('/api/admin/logs', methods=['GET'])
 def logs_list():
-    """列出最近的会话日志（历史）。"""
+    """列出最近的会话日志（历史），优先从数据库读取。"""
+    import time as _time
+    _start = _time.time()
     err = _check_auth()
     if err:
         return err
@@ -739,35 +811,80 @@ def logs_list():
     limit = int(request.args.get('limit', '30'))
     q = (request.args.get('q') or '').strip()
     date = (request.args.get('date') or '').strip() or None
+    sort = (request.args.get('sort') or 'updated_at').strip()
+    dir_ = (request.args.get('dir') or 'desc').strip()
+    fix_status = (request.args.get('fix_status') or '').strip()
 
     notes = _load_log_notes()
 
-    idx_rows = conv_idx.list_admin_rows(limit=limit, q=q, date=date)
-    if idx_rows is not None:
+    _t_db_start = _time.time()
+    rows: list[dict[str, Any]] = []
+    _db_error: str | None = None
+    try:
+        rows = conversation_store.list_conversations(
+            limit=limit, q=q, date=date or '', sort_field=sort, sort_dir=dir_,
+            fix_status=fix_status,
+        )
+    except Exception as e:
+        _db_error = str(e)[:200]
+        logger.warning('[性能] GET /api/admin/logs DB 查询异常 (将重试): %s', _db_error)
+        # 短暂等待后重试一次（可能只是 WAL 检查点导致的瞬时锁）
+        try:
+            _time.sleep(0.1)
+            rows = conversation_store.list_conversations(
+                limit=limit, q=q, date=date or '', sort_field=sort, sort_dir=dir_,
+                fix_status=fix_status,
+            )
+            logger.info('[性能] GET /api/admin/logs DB 重试成功 → %d条', len(rows))
+        except Exception as e2:
+            _db_error = str(e2)[:200]
+            logger.error('[性能] GET /api/admin/logs DB 重试仍失败: %s', _db_error)
+    _t_db_ms = (_time.time() - _t_db_start) * 1000
+
+    if rows or _db_error is None:
+        # DB 查询成功（即使结果为空也走这里——筛选条件可能确实没匹配到数据）
+        _t_build_start = _time.time()
         items: list[dict[str, Any]] = []
-        for row in idx_rows:
-            cid = row['conversation_id']
+        for row in rows:
+            cid = row.get('id', '')
+            updated = row.get('updated_at', '')
             items.append({
                 'conversation_id': cid,
-                'date': row['date'],
-                'route': row['route'],
-                'last_client_model': row['last_client_model'],
-                'last_backend': row['last_backend'],
-                'created_at': row['created_at'],
-                'updated_at': row['updated_at'],
-                'turn_count': row['turn_count'],
+                'date': updated[:10] if updated else '',
+                'route': row.get('route', '') or '',
+                'last_client_model': row.get('last_client_model', '') or '',
+                'last_backend': row.get('last_backend', '') or '',
+                'created_at': row.get('created_at', '') or '',
+                'updated_at': updated or '',
+                'turn_count': int(row.get('turn_count', 0) or 0),
+                'error_turn_count': int(row.get('error_turn_count', 0) or 0),
+                'has_error': bool(row.get('has_error', 0)),
+                'fix_status': row.get('fix_status', '') or '',
                 'note': (notes.get(cid) or {}).get('note', ''),
             })
-        return jsonify({'items': items})
+        _t_build_ms = (_time.time() - _t_build_start) * 1000
+        _t_json_start = _time.time()
+        result = jsonify({'items': items})
+        _t_json_ms = (_time.time() - _t_json_start) * 1000
+        total_ms = (_time.time() - _start) * 1000
+        logger.info(
+            '[性能] GET /api/admin/logs limit=%d q=%r date=%r fix_status=%r sort=%s %s '
+            '→ %d条 DB=%.0fms build=%.0fms json=%.0fms total=%.0fms',
+            limit, q[:30] if q else '', date or '', fix_status, sort, dir_,
+            len(items), _t_db_ms, _t_build_ms, _t_json_ms, total_ms,
+        )
+        if not items and fix_status:
+            logger.info('[性能] GET /api/admin/logs DB 查询成功但筛选结果为空 (fix_status=%r)', fix_status)
+        return result
 
+    # 回退：DB 查询失败（有异常）时读文件
+    logger.warning('[性能] GET /api/admin/logs DB 不可用，回退到文件扫描 (error=%s)', _db_error)
+    _t_fallback_start = _time.time()
     files = _list_conversation_files()
     if date:
         files = [f for f in files if os.path.basename(os.path.dirname(f)) == date]
-
-    # 如果要做 q 过滤，先多读一点，避免过滤后数量不足
     read_count = max(limit * 5, limit)
     files = files[:read_count]
-
     items: list[dict[str, Any]] = []
     for fp in files:
         try:
@@ -775,20 +892,17 @@ def logs_list():
                 doc = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
-
         conversation_id = doc.get('conversation_id') or os.path.splitext(os.path.basename(fp))[0]
         route_name = doc.get('route', '')
         last_model = doc.get('last_client_model', '')
         updated_at = doc.get('updated_at', '')
         created_at = doc.get('created_at', '')
         turn_count = int(doc.get('turn_count', 0) or 0)
-
         if q:
             q_lower = q.lower()
             hay = ' '.join([str(conversation_id), str(route_name), str(last_model)]).lower()
             if q_lower not in hay:
                 continue
-
         items.append({
             'conversation_id': conversation_id,
             'date': os.path.basename(os.path.dirname(fp)),
@@ -800,55 +914,123 @@ def logs_list():
             'turn_count': turn_count,
             'note': (notes.get(conversation_id) or {}).get('note', ''),
         })
-
         if len(items) >= limit:
             break
-
+    t = (_time.time() - _start) * 1000
+    t_fallback = (_time.time() - _t_fallback_start) * 1000
+    logger.warning('[性能] GET /api/admin/logs 文件回退 扫描%d个文件 返回%d条 fallback=%.0fms total=%.0fms',
+                   len(files), len(items), t_fallback, t)
     return jsonify({'items': items})
 
 
 @bp.route('/api/admin/logs/<path:conversation_id>', methods=['GET'])
 def logs_detail(conversation_id: str):
-    """查看某个会话日志的完整内容。"""
+    """查看某个会话日志的完整内容（优先数据库）。
+
+    支持参数:
+      ?turn=N            只返回指定 turn（索引从 0 开始），默认返回第一个
+      ?turn_id=xxx       按 turn_id 精确查找
+      ?fields=summary    只返回元数据 + turn 摘要，不返回消息体和流式事件
+    """
+    import time as _time
+    _start = _time.time()
     err = _check_auth()
     if err:
         return err
 
+    turn_idx = request.args.get('turn', '').strip()
+    turn_idx = int(turn_idx) if turn_idx.lstrip('-').isdigit() else None
+    turn_id = (request.args.get('turn_id') or '').strip() or None
+
+    # 优先从数据库读取
+    try:
+        detail = conversation_store.get_turn_detail(
+            conversation_id,
+            turn_index=turn_idx if turn_idx is not None else (None if turn_id else 0),
+            turn_id=turn_id,
+        )
+    except Exception:
+        detail = None
+
+    if detail:
+        notes = _load_log_notes()
+        note_entry = notes.get(conversation_id) or {}
+        result = {
+            'conversation': detail,
+            'note': note_entry.get('note', ''),
+        }
+        total_ms = (_time.time() - _start) * 1000
+        logger.info('[性能] GET /api/admin/logs/%s?turn=%s DB 总turns=%d 耗时%.0fms',
+                    conversation_id, turn_idx if turn_idx is not None else 0,
+                    detail.get('_total_turns', 0), total_ms)
+        return jsonify(result)
+
+    # 回退：DB 无数据，走文件路径
     date = (request.args.get('date') or '').strip() or None
+    if turn_idx is not None and date:
+        turn_fp = os.path.join(_LOG_DIR, date, f'{conversation_id}_turn{turn_idx}.json')
+        if os.path.isfile(turn_fp):
+            try:
+                with open(turn_fp, 'r', encoding='utf-8') as f:
+                    raw = f.read()
+                doc = json.loads(raw)
+                notes = _load_log_notes()
+                note_entry = notes.get(conversation_id) or {}
+                result = {'conversation': doc, 'note': note_entry.get('note', '')}
+                total_ms = (_time.time() - _start) * 1000
+                logger.info('[性能] GET /api/admin/logs/%s?turn=%d turn文件回退 大小=%.0fKB 耗时%.0fms',
+                            conversation_id, turn_idx, len(raw) / 1024, total_ms)
+                return jsonify(result)
+            except (OSError, json.JSONDecodeError):
+                pass
+
     fp = _find_conversation_file(conversation_id, date)
     if not fp:
         return jsonify({'error': '日志不存在'}), 404
 
     try:
         with open(fp, 'r', encoding='utf-8') as f:
-            doc = json.load(f)
+            raw = f.read()
+        doc = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return jsonify({'error': '日志读取失败'}), 500
 
+    if turn_idx is not None:
+        all_turns = doc.get('turns', [])
+        if 0 <= turn_idx < len(all_turns):
+            doc['turns'] = [all_turns[turn_idx]]
+            doc['_current_turn'] = turn_idx
+            doc['_total_turns'] = len(all_turns)
+        else:
+            return jsonify({'error': 'turn 索引超出范围', 'total_turns': len(all_turns)}), 400
+
     notes = _load_log_notes()
     note_entry = notes.get(conversation_id) or {}
-    return jsonify({
-        'conversation': doc,
-        'note': note_entry.get('note', ''),
-    })
+    result = {'conversation': doc, 'note': note_entry.get('note', '')}
+    total_ms = (_time.time() - _start) * 1000
+    logger.info('[性能] GET /api/admin/logs/%s 文件回退 大小=%.0fKB 耗时%.0fms',
+                conversation_id, len(raw) / 1024, total_ms)
+    return jsonify(result)
 
 
 @bp.route('/api/admin/logs/<path:conversation_id>', methods=['DELETE'])
 def logs_delete(conversation_id: str):
-    """删除某个会话日志文件。"""
+    """删除某个会话日志（数据库 + 文件）。"""
     err = _check_auth()
     if err:
         return err
 
-    date = (request.args.get('date') or '').strip() or None
-    fp = _find_conversation_file(conversation_id, date)
-    if not fp:
-        return jsonify({'ok': True})
-
     try:
-        os.remove(fp)
-    except OSError as e:
-        return jsonify({'error': {'message': f'delete failed: {e}', 'type': 'delete_error'}}), 500
+        conversation_store.delete_conversation(conversation_id)
+    except Exception:
+        pass
+
+    # 删除所有相关 JSON 文件
+    for fp in _find_conversation_files_all(conversation_id):
+        try:
+            os.remove(fp)
+        except OSError:
+            pass
 
     conv_idx.delete_conversation(conversation_id)
 
@@ -858,6 +1040,376 @@ def logs_delete(conversation_id: str):
         _save_log_notes(notes)
 
     return jsonify({'ok': True})
+
+
+@bp.route('/api/admin/logs/batch-delete', methods=['POST'])
+def logs_batch_delete():
+    """批量删除会话日志（DB + 文件）。"""
+    err = _check_auth()
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    ids = data.get('ids') or []
+    if not ids or not isinstance(ids, list):
+        return jsonify({'error': '请提供 ids 列表'}), 400
+    deleted = 0
+    for conv_id in ids:
+        try:
+            conversation_store.delete_conversation(str(conv_id))
+            # 同步删除 JSON 文件
+            for fp in _find_conversation_files_all(str(conv_id)):
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+            deleted += 1
+        except Exception as e:
+            logger.warning('删除会话 %s 失败: %s', conv_id, e)
+    return jsonify({'ok': True, 'deleted': deleted, 'total': len(ids)})
+
+
+def _find_conversation_files_all(conv_id: str) -> list[str]:
+    """查找某个会话的所有相关文件（完整文件 + turn 分片）。"""
+    if not os.path.isdir(_LOG_DIR):
+        return []
+    results = []
+    for day_dir in glob.glob(os.path.join(_LOG_DIR, '*')):
+        if not os.path.isdir(day_dir):
+            continue
+        for pattern in [f'{conv_id}.json', f'{conv_id}_turn*.json']:
+            for fp in glob.glob(os.path.join(day_dir, pattern)):
+                results.append(fp)
+    return results
+
+
+# ─── 修复规则管理 ─────────────────────────────────
+
+_FIXES_FILE = os.path.join(DATA_DIR, 'error_fixes.json')
+_FIXES_LOCK = threading.Lock()
+
+
+def _load_fixes() -> dict[str, Any]:
+    with _FIXES_LOCK:
+        if not os.path.exists(_FIXES_FILE):
+            return {'fixes': []}
+        try:
+            with open(_FIXES_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {'fixes': []}
+        except (OSError, json.JSONDecodeError):
+            return {'fixes': []}
+
+
+def _save_fixes(data: dict[str, Any]) -> None:
+    with _FIXES_LOCK:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_FIXES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@bp.route('/api/admin/error-fixes', methods=['GET'])
+def list_error_fixes():
+    err = _check_auth()
+    if err: return err
+    return jsonify(_load_fixes())
+
+
+@bp.route('/api/admin/error-fixes', methods=['POST'])
+def add_error_fix():
+    err = _check_auth()
+    if err: return err
+    data = request.get_json(force=True, silent=True) or {}
+    fixes = _load_fixes()
+    import time as _t
+    entry = {
+        'id': 'fix_' + str(int(_t.time())),
+        'error_pattern': str(data.get('error_pattern', '')),
+        'upstream_llm': str(data.get('upstream_llm', '')),
+        'problem': str(data.get('problem', '')),
+        'fix_description': str(data.get('fix_description', '')),
+        'fix_version': str(data.get('fix_version', '')),
+        'patch_handler': str(data.get('patch_handler', '')),
+        'status': 'active',
+        'created_at': datetime.now(timezone.utc).isoformat(),
+    }
+    fixes.setdefault('fixes', []).append(entry)
+    _save_fixes(fixes)
+    return jsonify({'ok': True, 'fix': entry})
+
+
+@bp.route('/api/admin/error-fixes/<fix_id>', methods=['PUT'])
+def update_error_fix(fix_id):
+    err = _check_auth()
+    if err: return err
+    data = request.get_json(force=True, silent=True) or {}
+    fixes = _load_fixes()
+    for f in fixes.get('fixes', []):
+        if f.get('id') == fix_id:
+            if 'status' in data: f['status'] = data['status']
+            if 'fix_description' in data: f['fix_description'] = data['fix_description']
+            if 'problem' in data: f['problem'] = data['problem']
+            _save_fixes(fixes)
+            return jsonify({'ok': True, 'fix': f})
+    return jsonify({'error': '未找到'}), 404
+
+
+@bp.route('/api/admin/error-fixes/<fix_id>', methods=['DELETE'])
+def delete_error_fix(fix_id):
+    err = _check_auth()
+    if err: return err
+    fixes = _load_fixes()
+    fixes['fixes'] = [f for f in fixes.get('fixes', []) if f.get('id') != fix_id]
+    _save_fixes(fixes)
+    return jsonify({'ok': True})
+
+
+@bp.route('/admin/status')
+@bp.route('/admin/status/')
+def admin_status_page():
+    """返回服务器状态仪表盘页面。"""
+    return send_from_directory(_STATIC_DIR, 'status.html')
+
+
+@bp.route('/api/admin/logs/live-stream', methods=['GET'])
+def logs_live_stream():
+    """SSE 实时日志流（给状态仪表盘用）。"""
+    err = _check_auth_with_query_key()
+    if err: return err
+    from utils import log_stream
+
+    def gen():
+        q = log_stream.subscribe()
+        try:
+            yield sse_data_message({'type': 'hello'})
+            while True:
+                try:
+                    entry = q.get(timeout=2)
+                except queue.Empty:
+                    yield sse_data_message({'type': 'ping'})
+                    continue
+                yield sse_data_message({'type': 'log', 'entry': entry})
+        finally:
+            log_stream.unsubscribe(q)
+
+    return sse_response(gen())
+
+
+@bp.route('/api/admin/logs/recent', methods=['GET'])
+def logs_recent():
+    """获取最近 N 条日志（用于初始加载）。"""
+    err = _check_auth()
+    if err: return err
+    from utils import log_stream
+    n = int(request.args.get('n', '50'))
+    return jsonify({'entries': log_stream.get_recent(n)})
+
+
+def _get_cpu_pct() -> float:
+    """瞬时 CPU 使用率：读两次 /proc/stat，间隔 0.5s，取差值。
+
+    返回整个系统的 CPU 使用率百分比 (0~100)。
+    """
+    import time as _time
+    try:
+        with open('/proc/stat') as f:
+            f1 = [int(x) for x in f.readline().split()[1:]]
+        _time.sleep(0.5)
+        with open('/proc/stat') as f:
+            f2 = [int(x) for x in f.readline().split()[1:]]
+        idle_delta = f2[3] - f1[3]
+        total_delta = sum(f2) - sum(f1)
+        return round((1 - idle_delta / total_delta) * 100, 1) if total_delta > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _get_host_mem() -> tuple[int, int]:
+    """宿主机内存 (匹配宝塔面板)：读 /proc/meminfo。
+
+    Docker 默认不虚拟化 /proc/meminfo，所以容器内读到的就是宿主机数据。
+    返回 (used_mb, total_mb)。
+    """
+    try:
+        mem_total = mem_avail = 0
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    mem_total = int(line.split()[1])
+                if line.startswith('MemAvailable:'):
+                    mem_avail = int(line.split()[1])
+        if mem_total:
+            total_mb = mem_total // 1024
+            used_mb = (mem_total - mem_avail) // 1024
+            return (used_mb, total_mb)
+    except Exception:
+        pass
+    return (0, 0)
+
+
+@bp.route('/api/admin/server-status', methods=['GET'])
+def server_status():
+    """返回服务器实时状态数据。"""
+    err = _check_auth()
+    if err: return err
+    import os as _os, threading
+
+    # 内存（宿主机级别，匹配宝塔面板）
+    mem_used_mb, mem_limit_mb = _get_host_mem()
+
+    # CPU（瞬时值，采样两次）
+    cpu_pct = _get_cpu_pct()
+
+    # 磁盘
+    disk_free = 0
+    disk_used_pct = 0
+    try:
+        st = _os.statvfs(DATA_DIR)
+        disk_free = round(st.f_frsize * st.f_bavail / 1024 / 1024 / 1024, 1)
+        total = st.f_frsize * st.f_blocks
+        free = st.f_frsize * st.f_bavail
+        disk_used_pct = round((1 - free / total) * 100, 1) if total > 0 else 0
+    except Exception:
+        pass
+
+    # 打开文件数（当前进程）
+    open_files = 0
+    try:
+        open_files = len(_os.listdir(f'/proc/{_os.getpid()}/fd'))
+    except Exception:
+        pass
+
+    # 运行时间
+    uptime = 0
+    try:
+        with open('/proc/uptime') as f:
+            uptime = int(float(f.readline().split()[0]))
+    except Exception:
+        pass
+
+    stats = {
+        'server': {
+            'uptime_seconds': uptime,
+            'time': datetime.now(timezone.utc).isoformat(),
+        },
+        'resources': {
+            'cpu_percent': cpu_pct,
+            'memory_used_mb': mem_used_mb,
+            'memory_total_mb': mem_limit_mb,
+            'disk_free_gb': disk_free,
+            'disk_used_percent': disk_used_pct,
+            'threads': threading.active_count(),
+            'open_files': open_files,
+        },
+        'proxy': {
+            'total_requests': _STATS['total_requests'],
+            'total_errors': _STATS['total_errors'],
+            'active_streams': _STATS['active_streams'],
+            'requests_last_min': _STATS['requests_last_min'],
+            'patch_applied': _STATS['patch_applied'],
+            'patch_success': _STATS['patch_success'],
+            'patch_failed': _STATS['patch_failed'],
+        },
+        'upstream': {
+            'url': settings.get_url(),
+            'health': _check_upstream_health(),
+        },
+        'recent_errors': list(_STATS['recent_errors'])[-10:],
+    }
+
+    # 会话统计
+    try:
+        stats['conversations'] = {
+            'total': conversation_store.get_conversation_count(),
+            'with_errors': len(conversation_store.list_conversations(limit=1000, fix_status='has_error')),
+        }
+    except Exception:
+        stats['conversations'] = {'total': 0, 'with_errors': 0}
+
+    return jsonify(stats)
+
+
+# ─── 运行时统计 ────────────────────────────────
+_STATS = {
+    'total_requests': 0,
+    'total_errors': 0,
+    'active_streams': 0,
+    'requests_last_min': 0,
+    'patch_applied': 0,
+    'patch_success': 0,
+    'patch_failed': 0,
+    'recent_errors': [],
+}
+_STATS_LOCK = threading.Lock()
+_last_min_counter = [0, 0.0]  # [count, window_start]
+
+def record_request():
+    global _last_min_counter
+    with _STATS_LOCK:
+        _STATS['total_requests'] += 1
+        now = time.time()
+        if now - _last_min_counter[1] > 60:
+            _STATS['requests_last_min'] = _last_min_counter[0]
+            _last_min_counter = [1, now]
+        else:
+            _last_min_counter[0] += 1
+
+def record_error(msg: str):
+    global _STATS
+    with _STATS_LOCK:
+        _STATS['total_errors'] += 1
+        _STATS['recent_errors'].append({
+            'time': datetime.now(timezone.utc).isoformat(),
+            'message': msg[:200],
+        })
+        if len(_STATS['recent_errors']) > 50:
+            _STATS['recent_errors'] = _STATS['recent_errors'][-50:]
+
+def record_patch(success: bool):
+    global _STATS
+    with _STATS_LOCK:
+        _STATS['patch_applied'] += 1
+        if success:
+            _STATS['patch_success'] += 1
+        else:
+            _STATS['patch_failed'] += 1
+
+def stream_started():
+    global _STATS
+    with _STATS_LOCK:
+        _STATS['active_streams'] += 1
+
+def stream_ended():
+    global _STATS
+    with _STATS_LOCK:
+        _STATS['active_streams'] = max(0, _STATS['active_streams'] - 1)
+
+def _check_upstream_health():
+    import requests as _r
+    try:
+        t0 = time.time()
+        r = _r.get(settings.get_url().rstrip('/') + '/models', timeout=5,
+                   headers={'Authorization': 'Bearer ' + (settings.get_key() or 'none')})
+        ms = int((time.time() - t0) * 1000)
+        return {'ok': r.status_code < 500, 'status': r.status_code, 'latency_ms': ms}
+    except Exception as e:
+        return {'ok': False, 'status': 0, 'latency_ms': 0, 'error': str(e)[:100]}
+
+
+@bp.route('/api/admin/logs/search', methods=['GET'])
+def logs_search():
+    """全文搜索消息内容。"""
+    err = _check_auth()
+    if err:
+        return err
+    q = (request.args.get('q') or '').strip()
+    if not q or len(q) < 2:
+        return jsonify({'error': '搜索词至少 2 个字符'}), 400
+    try:
+        results = conversation_store.search_messages(q, limit=50)
+        return jsonify({'items': results, 'q': q})
+    except Exception as e:
+        logger.warning('搜索失败: %s', e)
+        return jsonify({'error': '搜索暂时不可用'}), 500
 
 
 @bp.route('/api/admin/logs/clear', methods=['POST'])
@@ -882,6 +1434,10 @@ def logs_clear():
                     ensure_ascii=False,
                 ) + '\n'
                 conv_idx.clear_all_rows()
+            try:
+                conversation_store.clear_all()
+            except Exception:
+                pass
                 return
 
             files = glob.glob(os.path.join(_LOG_DIR, '*', '*.json'))
@@ -923,6 +1479,10 @@ def logs_clear():
                 ensure_ascii=False,
             ) + '\n'
             conv_idx.clear_all_rows()
+            try:
+                conversation_store.clear_all()
+            except Exception:
+                pass
         except Exception as e:
             logger.exception('清空历史日志异常')
             yield json.dumps({'phase': 'error', 'message': str(e)}, ensure_ascii=False) + '\n'

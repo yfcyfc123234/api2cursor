@@ -15,6 +15,10 @@ logging.basicConfig(
 )
 
 from config import Config
+from utils.log_categories import init as init_log_categories
+
+init_log_categories()
+
 from app import create_app
 
 
@@ -30,6 +34,7 @@ def main():
         app,
         host='0.0.0.0',
         port=Config.PROXY_PORT,
+        threads=16,
         channel_timeout=Config.API_TIMEOUT,
         send_bytes=1,
     )

@@ -26,10 +26,14 @@ def extract_from_text(content):
 
 
 class ThinkTagExtractor:
-    """流式 <think> 标签提取器
+    """流式 <think> 标签提取器 + reasoning_content → content 桥接
 
     处理跨 chunk 的 <think>...</think> 标签，将标签内的文本
     转为 reasoning_content delta，标签外的文本保持为 content delta。
+
+    桥接逻辑：部分上游（如 DeepSeek）在 delta 中直接返回 reasoning_content，
+    但 Cursor 的 OpenAI 兼容客户端不渲染该字段。这里将 reasoning_content
+    额外复制到 content，并用 `▸` 前缀区分思考过程与最终回答。
 
     额外处理：
     - content 和 tool_calls 同时出现时拆分为两个独立 chunk（Cursor 会丢弃同时包含两者的 content）
@@ -37,10 +41,16 @@ class ThinkTagExtractor:
     - 流结束时如果 think 标签仍未关闭，自动合成关闭 chunk
     """
 
-    def __init__(self):
-        """初始化跨 chunk 的 thinking 状态跟踪。"""
+    def __init__(self, enable_bridge: bool = False):
+        """初始化跨 chunk 的 thinking 状态跟踪。
+
+        enable_bridge: 是否将上游 reasoning_content 复制到 content（供 Cursor 显示）
+        """
         self._in_thinking = False
         self._tool_calls_seen = False
+        self._enable_bridge = enable_bridge
+        self._reasoning_seen = False   # 是否已输出过 reasoning 头部标记
+        self._reasoning_ended = False  # reasoning 阶段是否已结束
 
     def process_chunk(self, chunk):
         """处理一个流式 chunk，返回转换后的 chunk 列表"""
@@ -69,6 +79,8 @@ class ThinkTagExtractor:
                 return self._handle_tool_calls_chunk(chunk)
 
             if delta.get('reasoning_content'):
+                if self._enable_bridge:
+                    return self._bridge_reasoning(chunk, delta['reasoning_content'])
                 return [chunk]
             content = delta.get('content')
             if content is None or content == '':
@@ -76,21 +88,58 @@ class ThinkTagExtractor:
             return self._process_content(chunk, content)
         return [chunk]
 
+    # ─── reasoning → content 桥接 ──────────────────────
+
+    def _bridge_reasoning(self, chunk, reasoning_text):
+        """将上游 reasoning_content 同时写入 delta.content。
+
+        上游的 reasoning_content 字段保留不动，额外把同一个文本塞进
+        content，这样 Cursor 即使不渲染 reasoning_content 也能显示思考过程。
+        """
+        results = []
+
+        # 首次 reasoning：输出视觉分隔头部
+        if not self._reasoning_seen:
+            self._reasoning_seen = True
+            results.append(self._make(chunk, content='\n💭 思考过程：\n\n'))
+
+        # 同一个 chunk：delta 里既有 reasoning_content 也有 content
+        results.append(self._make(chunk, content=reasoning_text, reasoning=reasoning_text))
+        return results
+
+    def _end_reasoning_if_needed(self, chunk):
+        """如果刚结束 reasoning 阶段，输出关闭标记。"""
+        if self._reasoning_seen and not self._reasoning_ended:
+            self._reasoning_ended = True
+            return [self._make(chunk, content='\n\n')]
+        return []
+
     def finalize(self):
-        """流结束时调用，如果 think 标签仍未关闭则返回关闭 chunk"""
-        if not self._in_thinking:
-            return None
-        self._in_thinking = False
-        return {
-            'id': '',
-            'object': 'chat.completion.chunk',
-            'model': '',
-            'choices': [{'index': 0, 'delta': {'content': '\n</think>\n\n'}, 'finish_reason': None}],
-        }
+        """流结束时调用，返回需要补充的关闭 chunk 列表。"""
+        results = []
+        if self._in_thinking:
+            self._in_thinking = False
+            results.append({
+                'id': '',
+                'object': 'chat.completion.chunk',
+                'model': '',
+                'choices': [{'index': 0, 'delta': {'content': '\n</think>\n\n'}, 'finish_reason': None}],
+            })
+        if self._reasoning_seen and not self._reasoning_ended:
+            self._reasoning_ended = True
+            results.append({
+                'id': '',
+                'object': 'chat.completion.chunk',
+                'model': '',
+                'choices': [{'index': 0, 'delta': {'content': '\n\n'}, 'finish_reason': None}],
+            })
+        return results
 
     def _process_content(self, chunk, content):
         """处理包含 content 的 chunk"""
-        return self._split(chunk, content)
+        results = list(self._end_reasoning_if_needed(chunk))
+        results.extend(self._split(chunk, content))
+        return results
 
     def _handle_tool_calls_chunk(self, chunk):
         """处理包含 tool_calls 的 chunk，首次出现时在前面插入换行"""
