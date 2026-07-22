@@ -15,6 +15,10 @@ logging.basicConfig(
 )
 
 from config import Config
+from utils.log_categories import init as init_log_categories
+
+init_log_categories()
+
 from app import create_app
 
 

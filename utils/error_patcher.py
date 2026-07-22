@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+from utils.log_categories import log as cat_log
 
 PatchAction = dict[str, Any]  # {'name': str, 'description': str, 'fix': callable, 'retryable': bool}
 
@@ -83,7 +84,7 @@ def _fix_deepseek_image_url(payload: dict[str, Any], _error: str) -> dict[str, A
         if has_image:
             msg['content'] = new_content
     if fixed_count:
-        logger.info('[补丁] deepseek/image_url: 替换了 %d 个 image_url', fixed_count)
+        cat_log('patch', '[补丁] deepseek/image_url: 替换了 %d 个 image_url', fixed_count)
     return payload
 
 
@@ -106,7 +107,7 @@ def _fix_deepseek_tool_args(payload: dict[str, Any], error: str) -> dict[str, An
                 parsed = json.loads(msg['content'])
                 if isinstance(parsed, list):
                     msg['content'] = json.dumps(parsed, ensure_ascii=False)
-                    logger.info('[补丁] deepseek/tool_args: 修复 messages[%d] content JSON 格式', msg_idx)
+                    cat_log('patch', '[补丁] deepseek/tool_args: 修复 messages[%d] content JSON 格式', msg_idx)
             except json.JSONDecodeError:
                 pass
     return payload
@@ -144,7 +145,7 @@ def _fix_deepseek_reasoning_content(payload: dict[str, Any], _error: str) -> dic
             del msg['reasoning_content']
             fixed += 1
     if fixed:
-        logger.info('[补丁] deepseek/reasoning_content: 剥离了 %d 条 assistant 消息的 reasoning_content', fixed)
+        cat_log('patch', '[补丁] deepseek/reasoning_content: 剥离了 %d 条 assistant 消息的 reasoning_content', fixed)
     return payload
 
 _register(
@@ -196,6 +197,14 @@ def _fix_rate_limit(_payload: dict[str, Any], _error: str) -> dict[str, Any]:
     """429 限流：不修改请求，仅标记需要重试。"""
     return _payload  # 请求本身不需要修改，只重试
 
+
+_register(
+    'generic',
+    r'1113|余额不足|无可用的资源包|insufficient_balance|insufficient_quota|billing',
+    '账户余额/资源包不足，不可重试',
+    _fix_rate_limit,
+    retryable=False,
+)
 
 _register(
     'generic',
@@ -283,7 +292,7 @@ def apply(payload: dict[str, Any], patch: PatchAction, error: str = '') -> dict[
         result = patch['fix'](json.loads(json.dumps(payload, ensure_ascii=False)), error)
         return result
     except Exception as e:
-        logger.warning('[补丁] 应用失败 %s: %s', patch.get('name', '?'), e)
+        cat_log('patch', '[补丁] 应用失败 %s: %s', patch.get('name', '?'), e, level=logging.WARNING)
         return payload
 
 

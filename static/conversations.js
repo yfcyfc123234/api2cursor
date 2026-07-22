@@ -264,6 +264,18 @@ async function batchDelete() {
 
 async function loadConversationList() {
   console.time('[前端] 加载会话列表');
+
+  // 显示 loading 状态
+  var listEl = document.getElementById('convList');
+  var wasEmpty = !CONVERSATIONS.length;
+  if (wasEmpty) {
+    // 首次加载：显示居中 loading
+    listEl.innerHTML = '<div class="empty"><span class="loading-spinner"></span> 加载中…</div>';
+  } else {
+    // 筛选/刷新：列表上方显示 loading 条
+    listEl.classList.add('conv-list-loading');
+  }
+
   try {
     var t0 = performance.now();
     if (!currentSort) currentSort = { field: 'updated_at', dir: 'desc' };
@@ -275,9 +287,11 @@ async function loadConversationList() {
     console.log('[前端] API /api/admin/logs 返回 ' + (data.items || []).length + ' 条, 耗时 ' + apiMs + ' ms');
 
     CONVERSATIONS = data.items || [];
+    listEl.classList.remove('conv-list-loading');
     renderConversationList();
     console.timeEnd('[前端] 加载会话列表');
   } catch (e) {
+    listEl.classList.remove('conv-list-loading');
     console.timeEnd('[前端] 加载会话列表');
     toast('加载列表失败: ' + e.message, false);
     document.getElementById('convList').innerHTML = '<div class="empty">加载失败</div>';
@@ -427,6 +441,9 @@ async function openConversation(convId, date) {
     while (currentDoc.turns.length < totalTurns) {
       currentDoc.turns.push(null);
     }
+    console.log('[DEBUG] openConversation _turn_errors:', JSON.stringify(currentDoc._turn_errors),
+                '_total_turns:', totalTurns,
+                'turns.length:', currentDoc.turns.length);
     loadTurn(0);
     console.timeEnd('[前端] 打开会话');
   } catch (e) {
@@ -488,19 +505,65 @@ async function fetchTurn(idx) {
   }
 }
 
+var _MAX_VISIBLE_TURNS = 10;  // turn bar 最多直接显示的 tab 数，超出进下拉
+
 function renderTurnBar() {
   var totalTurns = currentDoc._allTurnCount || currentDoc.turns.length;
+  if (!totalTurns) { document.getElementById('turnBar').innerHTML = ''; return; }
+
+  // 从后端获取的 turn 错误摘要（不依赖 turn 是否已加载）
+  var turnErrors = currentDoc._turn_errors || {};
+  console.log('[DEBUG] renderTurnBar totalTurns:', totalTurns,
+              'turnErrors:', JSON.stringify(turnErrors),
+              'turns array length:', currentDoc.turns.length);
+
+  // 最新 turn 排最前面
+  var latestIdx = totalTurns - 1;
+  var oldestIdx = 0;
+
+  // 可见 tab：从最新到最旧，最多 _MAX_VISIBLE_TURNS 个
+  var visibleCount = Math.min(totalTurns, _MAX_VISIBLE_TURNS);
   var html = '';
-  for (var i = 0; i < totalTurns; i++) {
-    var t = currentDoc.turns[i];
+
+  for (var i = 0; i < visibleCount; i++) {
+    var idx = latestIdx - i;
+    var t = currentDoc.turns[idx];
+    var number = idx + 1;
     var cls = 'turn-tab';
-    if (i === currentTurnIdx) cls += ' active';
-    if (t && t.error) cls += ' turn-error';
-    var label = 'Turn ' + (i + 1);
+    if (idx === currentTurnIdx) cls += ' active';
+    if ((t && t.error) || turnErrors[idx]) cls += ' turn-error';
+    if (t && t._streaming) cls += ' turn-streaming';
+
+    var hasTurnErr = (t && t.error) || turnErrors[idx];
+    var label = number;
     if (!t) label += ' …';
-    else if (t.error) label += ' ⚠';
-    html += '<button class="' + cls + '" onclick="loadTurn(' + i + ')">' + label + '</button>';
+    else if (t._streaming) label += ' ⏳';
+    if (hasTurnErr) label += ' ⚠';
+
+    if (hasTurnErr) console.log('[DEBUG] renderTurnBar Turn', number, 'hasErr=true t:', !!t, 't.error:', !!(t && t.error), 'turnErrors[' + idx + ']:', !!turnErrors[idx]);
+
+    html += '<button class="' + cls + '" onclick="loadTurn(' + idx + ')" title="Turn ' + number + '">' + label + '</button>';
   }
+
+  // 剩余旧 turn 放入下拉菜单
+  var restCount = totalTurns - visibleCount;
+  if (restCount > 0) {
+    html += '<select class="turn-select" onchange="var v=this.value;if(v!==\'\'){loadTurn(parseInt(v));this.value=\'\';}">';
+    html += '<option value="">…' + restCount + ' 更早</option>';
+    for (var j = visibleCount; j < totalTurns; j++) {
+      var ij = latestIdx - j;
+      var tn = ij + 1;
+      var tt = currentDoc.turns[ij];
+      var tlabel = 'Turn ' + tn;
+      if ((tt && tt.error) || turnErrors[ij]) {
+        tlabel += ' ⚠';
+        console.log('[DEBUG] renderTurnBar dropdown Turn', (ij+1), 'hasErr=true');
+      }
+      html += '<option value="' + ij + '">' + tlabel + '</option>';
+    }
+    html += '</select>';
+  }
+
   document.getElementById('turnBar').innerHTML = html;
 }
 
@@ -987,20 +1050,60 @@ function toggleContrast() {
 }
 
 /* ===== SSE 实时更新 ===== */
-function startLiveSSE() {
+var sseToken = null;
+var sseTokenExpiry = 0;
+
+async function fetchSseToken() {
+  // 用主密钥换取临时 SSE token（避免主密钥出现在 URL 中）
+  try {
+    var data = await api('/api/admin/sse-token', { method: 'POST' });
+    sseToken = data.token;
+    sseTokenExpiry = (Date.now() / 1000) + (data.expires_in || 300) - 30; // 提前30秒刷新
+    console.log('[SSE] 获取临时 token, 有效期 ' + (data.expires_in || 300) + 's');
+    return sseToken;
+  } catch(e) {
+    console.error('[SSE] 获取临时 token 失败: ' + e.message + ', 回退用主密钥');
+    return authKey; // 回退（兼容旧版）
+  }
+}
+
+async function startLiveSSE() {
   if (liveEs) { try { liveEs.close(); } catch (e) {} }
 
-  var url = '/api/admin/logs/live';
-  if (authKey) url += '?key=' + encodeURIComponent(authKey);
+  // 优先用临时 token，URL 泄露后影响有限（5分钟过期）
+  var token = sseToken;
+  if (!token || Date.now() / 1000 > sseTokenExpiry) {
+    token = await fetchSseToken();
+  }
+
+  var url = '/api/admin/logs/live?filter=turn';
+  if (token) url += '&key=' + encodeURIComponent(token);
   liveEs = new EventSource(url);
 
   liveEs.onmessage = function (e) {
     if (!liveEnabled) return;
     try {
       var evt = JSON.parse(e.data);
-      if (evt.type === 'turn_started' || evt.type === 'turn_done') {
-        // 有新 turn，刷新列表
+      // 事件结构: {type: "log_event", kind: "turn_started"|"turn_done", conversation_id, turn_id, ...}
+      if (evt.type === 'log_event' && (evt.kind === 'turn_started' || evt.kind === 'turn_done')) {
+        var convId = evt.conversation_id;
+        console.log('[SSE] 收到事件 kind=' + evt.kind + ' conv=' + (convId || '').substring(0, 20) + '...');
+
+        // 刷新左侧列表
         loadConversationList();
+
+        if (!convId) return;
+
+        // 右边详情即时刷新
+        if (convId === currentConvId) {
+          if (evt.kind === 'turn_started') {
+            // 新 turn 开始：在列表中插入流式占位
+            appendStreamingPlaceholder(convId, evt.turn_id);
+          } else if (evt.kind === 'turn_done') {
+            // 新 turn 完成：拉取完整数据替换占位
+            appendNewTurnToViewer(convId, evt.turn_id);
+          }
+        }
       }
     } catch (err) {}
   };
@@ -1061,6 +1164,74 @@ function copyConversation() {
     }
   } catch(e) {
     toast('复制失败: ' + e.message, false);
+  }
+}
+
+/* ===== 实时刷新右侧详情 ===== */
+
+function appendStreamingPlaceholder(convId, turnId) {
+  // turn_started: 在 turn bar 插入一个流式占位 tab，但不切换内容
+  if (!currentDoc || convId !== currentConvId) return;
+  for (var i = 0; i < currentDoc.turns.length; i++) {
+    var t = currentDoc.turns[i];
+    if (t && t._streaming && t.turn_id === turnId) return;
+  }
+
+  var placeholder = { turn_id: turnId, _streaming: true, client_model: '', backend: '', stream: true, error: null };
+  currentDoc._allTurnCount = (currentDoc._allTurnCount || currentDoc.turns.length) + 1;
+  currentDoc.turns.push(placeholder);
+
+  renderTurnBar();
+  console.log('[SSE] 流式占位已添加 turn_id=' + turnId + ' (未自动切换)');
+}
+
+async function appendNewTurnToViewer(convId, turnId) {
+  if (!currentDoc || convId !== currentConvId) return;
+
+  try {
+    // 移除之前可能存在的流式占位
+    var streamingIdx = -1;
+    for (var i = 0; i < currentDoc.turns.length; i++) {
+      if (currentDoc.turns[i] && currentDoc.turns[i]._streaming && currentDoc.turns[i].turn_id === turnId) {
+        streamingIdx = i;
+        break;
+      }
+    }
+
+    // 获取新 turn 的详情
+    var params = '?turn_id=' + encodeURIComponent(turnId);
+    if (currentDate) params += '&date=' + encodeURIComponent(currentDate);
+    var data = await api('/api/admin/logs/' + encodeURIComponent(convId) + params);
+    var newDoc = data.conversation;
+    var newTurn = newDoc.turns[0];
+    if (!newTurn) return;
+
+    var newTotal = newDoc._total_turns || currentDoc._allTurnCount;
+
+    if (streamingIdx >= 0) {
+      // 替换流式占位
+      currentDoc.turns[streamingIdx] = newTurn;
+      currentDoc._allTurnCount = newTotal;
+      // 同步数组长度
+      while (currentDoc.turns.length < newTotal) currentDoc.turns.push(null);
+    } else {
+      // 直接追加（如果占位已被清理或从未创建）
+      currentDoc._allTurnCount = newTotal;
+      while (currentDoc.turns.length < newTotal - 1) currentDoc.turns.push(null);
+      currentDoc.turns.push(newTurn);
+    }
+
+    renderTurnBar();
+
+    // 不自动切换：用户可能正在看其他 turn
+    // 如果当前正在看的 turn 刚好被替换了（之前是流式占位），则刷新当前内容
+    if (streamingIdx >= 0 && currentTurnIdx === streamingIdx) {
+      loadTurn(streamingIdx);
+    }
+
+    console.log('[SSE] 右侧 Turn ' + (streamingIdx >= 0 ? streamingIdx + 1 : 'new') + ' 已刷新 (总=' + newTotal + ', 未切换)');
+  } catch(e) {
+    console.warn('[SSE] 刷新右侧详情失败: ' + e.message);
   }
 }
 

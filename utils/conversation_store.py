@@ -24,9 +24,10 @@ from settings import DATA_DIR
 from utils.http import gen_id
 
 logger = logging.getLogger(__name__)
+from utils.log_categories import log as _log
 
 _DB_LOCK = threading.Lock()
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 _STORE_PATH = os.path.join(DATA_DIR, 'conversations.db')
 
@@ -132,6 +133,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_conv_error ON conversations(has_error, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_conv_model ON conversations(last_client_model);
         CREATE INDEX IF NOT EXISTS idx_turns_error ON turns(error_stage);
+        CREATE INDEX IF NOT EXISTS idx_turns_conv_error ON turns(conversation_id, error_stage);
     """)
     cur = conn.execute('PRAGMA user_version')
     ver = cur.fetchone()[0]
@@ -165,6 +167,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             pass
         try:
             conn.execute("ALTER TABLE turns ADD COLUMN matched_fix_id TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+    if ver < 5:
+        # v4 → v5: 为 error_turn_count LEFT JOIN 查询添加复合索引
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_conv_error ON turns(conversation_id, error_stage)")
         except sqlite3.OperationalError:
             pass
     if ver < _SCHEMA_VERSION:
@@ -401,51 +409,94 @@ def list_conversations(*, limit: int = 50, q: str = '', date: str = '',
     """列出会话（用于管理面板列表）。
 
     fix_status: 逗号分隔多值，如 'has_error,fixed_failed'。
+
+    性能优化（v5）：用派生表预聚合替代关联子查询计算 error_turn_count，
+    从 N+1 次子查询降为 1 次 MATERIALIZE，主查询可用 idx_conv_updated 排序。
     """
-    with _DB_LOCK:
-        conn = _connect()
-        try:
-            ensure_schema(conn)
-            allowed_sort = {'updated_at', 'created_at', 'turn_count', 'last_client_model', 'last_backend'}
-            sf = sort_field if sort_field in allowed_sort else 'updated_at'
-            sd = 'DESC' if sort_dir.lower() == 'desc' else 'ASC'
+    import time as _time
+    _t_total_start = _time.time()
 
-            where = ['1=1']
-            params: list[Any] = []
-            if date:
-                where.append("date(updated_at) = ?")
-                params.append(date)
-            if q:
-                like = f'%{q}%'
-                where.append(
-                    "(c.id LIKE ? OR c.route LIKE ? OR c.last_client_model LIKE ? OR c.last_backend LIKE ?"
-                    " OR EXISTS (SELECT 1 FROM turns t2 JOIN messages m2 ON t2.id = m2.turn_id"
-                    " WHERE t2.conversation_id = c.id AND m2.content LIKE ?))")
-                params.extend([like, like, like, like, like])
-            if fix_status:
-                statuses = [s.strip() for s in fix_status.split(',') if s.strip()]
-                if statuses:
-                    clauses = []
-                    for s in statuses:
-                        if s == 'has_error':
-                            clauses.append('has_error = 1 AND (fix_status = \'\' OR fix_status = \'fixed_failed\')')
-                        elif s in ('fixed_success', 'fixed_failed', 'fixed_pending'):
-                            clauses.append(f'fix_status = ?')
-                            params.append(s)
-                        elif s == 'no_error':
-                            clauses.append('has_error = 0')
-                    if clauses:
-                        where.append(f'({") OR (".join(clauses)})')
+    # 读操作不使用 _DB_LOCK：SQLite WAL 模式原生支持读写并发，
+    # Python 互斥锁会导致 insert_turn 写入时阻塞所有读操作。
+    conn = _connect()
+    try:
+        _t_schema = _time.time()
+        ensure_schema(conn)
+        _t_schema_ms = (_time.time() - _t_schema) * 1000
 
-            sql = f"""SELECT c.*,
-                (SELECT COUNT(*) FROM turns t WHERE t.conversation_id = c.id AND t.error_stage IS NOT NULL) as error_turn_count
-                FROM conversations c
-                WHERE {' AND '.join(where)} ORDER BY {sf} {sd} LIMIT ?"""
-            params.append(limit)
-            rows = conn.execute(sql, params).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
+        allowed_sort = {'updated_at', 'created_at', 'turn_count', 'last_client_model', 'last_backend'}
+        sf = sort_field if sort_field in allowed_sort else 'updated_at'
+        sd = 'DESC' if sort_dir.lower() == 'desc' else 'ASC'
+
+        where = ['1=1']
+        params: list[Any] = []
+        if date:
+            where.append("date(c.updated_at) = ?")
+            params.append(date)
+        if q:
+            like = f'%{q}%'
+            where.append(
+                "(c.id LIKE ? OR c.route LIKE ? OR c.last_client_model LIKE ? OR c.last_backend LIKE ?"
+                " OR EXISTS (SELECT 1 FROM turns t2 JOIN messages m2 ON t2.id = m2.turn_id"
+                " WHERE t2.conversation_id = c.id AND m2.content LIKE ?))")
+            params.extend([like, like, like, like, like])
+        if fix_status:
+            statuses = [s.strip() for s in fix_status.split(',') if s.strip()]
+            if statuses:
+                clauses = []
+                for s in statuses:
+                    if s == 'has_error':
+                        clauses.append("c.has_error = 1 AND (c.fix_status = '' OR c.fix_status = 'fixed_failed')")
+                    elif s in ('fixed_success', 'fixed_failed', 'fixed_pending'):
+                        clauses.append('c.fix_status = ?')
+                        params.append(s)
+                    elif s == 'no_error':
+                        clauses.append('c.has_error = 0')
+                if clauses:
+                    where.append(f'({") OR (".join(clauses)})')
+
+        # 用派生表预聚合替代关联子查询，一次算出 error_turn_count
+        where_clause = ' AND '.join(where)
+        sql = f"""SELECT c.*, COALESCE(t_err.cnt, 0) as error_turn_count
+            FROM conversations c
+            LEFT JOIN (
+                SELECT conversation_id, COUNT(*) as cnt
+                FROM turns
+                WHERE error_stage IS NOT NULL
+                GROUP BY conversation_id
+            ) t_err ON t_err.conversation_id = c.id
+            WHERE {where_clause}
+            ORDER BY c.{sf} {sd} LIMIT ?"""
+        params.append(limit)
+
+        _t_query_start = _time.time()
+
+        # 调试模式：输出 EXPLAIN QUERY PLAN 验证索引使用
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                explain_rows = conn.execute(
+                    f'EXPLAIN QUERY PLAN {sql}', params
+                ).fetchall()
+                logger.debug(
+                    '[SQL解释] list_conversations EXPLAIN:\n%s',
+                    '\n'.join(f'  {dict(r)}' for r in explain_rows),
+                )
+            except Exception:
+                pass
+
+        rows = conn.execute(sql, params).fetchall()
+        _t_query_ms = (_time.time() - _t_query_start) * 1000
+
+        total_ms = (_time.time() - _t_total_start) * 1000
+        logger.info(
+            '[性能] list_conversations limit=%d q=%r date=%r fix_status=%r sort=%s %s '
+            '→ %d行 schema=%.0fms query=%.0fms total=%.0fms',
+            limit, q[:50] if q else '', date or '', fix_status, sf, sd,
+            len(rows), _t_schema_ms, _t_query_ms, total_ms,
+        )
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_conversation_meta(conv_id: str) -> dict[str, Any] | None:
@@ -504,6 +555,18 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
             total_turns = conn.execute(
                 "SELECT COUNT(*) FROM turns WHERE conversation_id = ?", (conv_id,)
             ).fetchone()[0]
+
+            # 获取所有 turn 的错误状态摘要（供前端 turn bar 显示 ⚠ 图标）
+            error_rows = conn.execute(
+                "SELECT turn_index, error_stage, error_message FROM turns WHERE conversation_id = ? ORDER BY turn_index",
+                (conv_id,),
+            ).fetchall()
+            _turn_errors = {}
+            for er in error_rows:
+                if er['error_stage'] or er['error_message']:
+                    _turn_errors[er['turn_index']] = True
+            _log('db', '[DB] get_turn_detail conv=%s total_turns=%d turn_errors=%s',
+                        conv_id, total_turns, json.dumps(_turn_errors) if _turn_errors else '{}')
 
             # 消息
             msgs = conn.execute(
@@ -636,6 +699,7 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
                 'last_backend': conv['last_backend'],
                 '_current_turn': turn.get('turn_index', 0),
                 '_total_turns': total_turns,
+                '_turn_errors': _turn_errors,
                 'turns': [result_turn],
             }
         finally:
@@ -643,13 +707,12 @@ def get_turn_detail(conv_id: str, turn_index: int | None = None, turn_id: str | 
 
 
 def get_conversation_count() -> int:
-    with _DB_LOCK:
-        conn = _connect()
-        try:
-            ensure_schema(conn)
-            return conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
-        finally:
-            conn.close()
+    conn = _connect()
+    try:
+        ensure_schema(conn)
+        return conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+    finally:
+        conn.close()
 
 
 def delete_conversation(conv_id: str) -> None:
