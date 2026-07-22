@@ -434,6 +434,7 @@ async function copyMapping(name) {
   document.getElementById('mBodyMods').value = Object.keys(bm).length ? JSON.stringify(bm) : '';
   var hm = m.header_modifications || {};
   document.getElementById('mHeaderMods').value = Object.keys(hm).length ? JSON.stringify(hm) : '';
+  document.getElementById('mReasoningToContent').checked = !!m.reasoning_to_content;
   editingName = null;
 }
 
@@ -450,6 +451,7 @@ function openAddModal() {
   document.getElementById('mInsPosition').value = 'prepend';
   document.getElementById('mBodyMods').value = '';
   document.getElementById('mHeaderMods').value = '';
+  document.getElementById('mReasoningToContent').checked = false;
   document.getElementById('modal').classList.add('active');
 }
 
@@ -470,6 +472,7 @@ async function openEditModal(name) {
     document.getElementById('mInsPosition').value = m.instructions_position || 'prepend';
     document.getElementById('mBodyMods').value = m.body_modifications && Object.keys(m.body_modifications).length ? JSON.stringify(m.body_modifications, null, 2) : '';
     document.getElementById('mHeaderMods').value = m.header_modifications && Object.keys(m.header_modifications).length ? JSON.stringify(m.header_modifications, null, 2) : '';
+    document.getElementById('mReasoningToContent').checked = !!m.reasoning_to_content;
     document.getElementById('modal').classList.add('active');
   } catch (e) {
     toast('错误: ' + e.message, false);
@@ -511,6 +514,7 @@ async function saveMapping() {
     instructions_position: document.getElementById('mInsPosition').value,
     body_modifications: bodyMods,
     header_modifications: headerMods,
+    reasoning_to_content: document.getElementById('mReasoningToContent').checked,
   };
 
   try {

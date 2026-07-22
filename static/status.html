@@ -158,11 +158,12 @@ function renderStatus(s) {
 
   // 资源
   var r = s.resources;
+  var memPct = r.memory_total_mb > 0 ? (r.memory_used_mb / r.memory_total_mb * 100).toFixed(1) : 0;
   document.getElementById('resourceInfo').innerHTML =
     'CPU: <strong>' + r.cpu_percent + '%</strong><br>' +
-    '内存: <strong>' + r.memory_used_mb + ' MB</strong> / ' + r.memory_total_mb + ' MB<br>' +
-    '磁盘空闲: <strong>' + r.disk_free_gb + ' GB</strong><br>' +
-    '线程: <strong>' + r.threads + '</strong> | 文件: <strong>' + r.open_files + '</strong><br>' +
+    '内存: <strong>' + r.memory_used_mb + ' MB</strong> / ' + r.memory_total_mb + ' MB (' + memPct + '%)<br>' +
+    '磁盘空闲: <strong>' + r.disk_free_gb + ' GB</strong> (已用 ' + (r.disk_used_percent || '?') + '%)<br>' +
+    '线程: <strong>' + r.threads + '</strong> | 文件: <strong>' + (r.open_files != null ? r.open_files : '?') + '</strong><br>' +
     '运行时间: <strong>' + formatUptime(s.server.uptime_seconds) + '</strong>';
 
   // 上游

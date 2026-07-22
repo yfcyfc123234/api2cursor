@@ -195,7 +195,7 @@ def _handle_openai_stream(
             yield responses_error_event(str(err))
             return
 
-        think_extractor = ThinkTagExtractor()
+        think_extractor = ThinkTagExtractor(enable_bridge=ctx.reasoning_to_content)
         chunk_count = 0
         client_events: list[str] = []
 

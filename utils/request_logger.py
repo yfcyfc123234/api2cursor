@@ -98,16 +98,25 @@ def _emit_live_event(*, kind: str, turn: dict[str, Any], payload: Any) -> None:
         'payload': _truncate_preview(payload),
     }
 
+    dead: list[queue.Queue] = []
     with _LIVE_SUBSCRIBERS_LOCK:
-        # 注意：不做深拷贝，payload 已经截断为字符串预览
         subscribers = list(_LIVE_SUBSCRIBERS)
 
     for q in subscribers:
         try:
             q.put_nowait(event)
         except queue.Full:
-            # 队列满则丢弃旧事件（不阻塞主线程）
-            pass
+            # 队列满 → 消费者可能已断开，累积失败后清理
+            fail_count = getattr(q, '_full_fail_count', 0) + 1
+            q._full_fail_count = fail_count  # type: ignore[attr-defined]
+            if fail_count >= 10:
+                dead.append(q)
+
+    if dead:
+        with _LIVE_SUBSCRIBERS_LOCK:
+            for q in dead:
+                _LIVE_SUBSCRIBERS.discard(q)
+        logger.warning('清理了 %d 个失效的 SSE 订阅者（队列持续满）', len(dead))
 
 
 def start_turn(

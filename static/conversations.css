@@ -144,6 +144,32 @@
   font-size: 13px;
 }
 
+/* loading 旋转动画 */
+.loading-spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+  vertical-align: middle;
+  margin-right: 4px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 列表刷新时顶部 loading 指示条 */
+.conv-list-loading::before {
+  content: '';
+  display: block;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: loading-bar 1s ease-in-out infinite;
+}
+@keyframes loading-bar {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
 .conv-item {
   padding: 10px 12px;
   border-radius: 6px;
@@ -244,8 +270,8 @@
   gap: 4px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
-  overflow-x: auto;
   flex-shrink: 0;
+  flex-wrap: wrap;           /* 允许换行，不产生横向滚动 */
 }
 .turn-tab {
   padding: 5px 12px;
@@ -257,6 +283,7 @@
   font-size: 12px;
   white-space: nowrap;
   transition: all .15s;
+  font-variant-numeric: tabular-nums;
 }
 .turn-tab:hover { border-color: var(--border); color: var(--text); }
 .turn-tab.active {
@@ -267,6 +294,30 @@
 }
 .turn-tab.turn-error { color: var(--red); }
 .turn-tab.turn-error.active { border-color: var(--red); color: var(--red); }
+
+/* 流式生成中的 turn：脉冲动画 */
+.turn-tab.turn-streaming {
+  color: var(--yellow);
+  border-color: var(--yellow);
+  animation: turn-pulse 1.2s ease-in-out infinite;
+}
+@keyframes turn-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .4; }
+}
+
+/* 溢出 turn 的下拉选择器 */
+.turn-select {
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 100px;
+}
+.turn-select:focus { outline: none; border-color: var(--primary); }
 
 /* 元数据摘要 */
 .conv-meta {
