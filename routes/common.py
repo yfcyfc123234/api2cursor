@@ -7,6 +7,7 @@ SSE 消息拼装逻辑，避免 `chat.py` 和 `responses.py` 各自维护重复�
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 from typing import Any
@@ -267,6 +268,25 @@ def inject_instructions_anthropic(payload: dict[str, Any], instructions: str, po
 
 
 # ─── Body / Header 修改 ──────────────────────────
+
+
+def ensure_prompt_cache_key(payload: dict[str, Any]) -> dict[str, Any]:
+    """确保 Responses 请求携带 prompt_cache_key，以便上游启用提示缓存。
+
+    部分上游对原生 /v1/responses 不会自动生成 prompt_cache_key，导致相同
+    系统提示的多轮对话无法命中缓存前缀。这里在客户端未显式提供时，按
+    model + instructions 生成稳定短哈希；已有值则原样保留。
+    """
+    if payload.get('prompt_cache_key'):
+        return payload
+
+    model = payload.get('model', '') or ''
+    instructions = payload.get('instructions', '') or ''
+    if not isinstance(instructions, str):
+        instructions = json.dumps(instructions, ensure_ascii=False, sort_keys=True)
+    seed = f'{model}|{instructions}'
+    payload['prompt_cache_key'] = hashlib.sha256(seed.encode('utf-8')).hexdigest()[:32]
+    return payload
 
 
 def apply_body_modifications(payload: dict[str, Any], modifications: dict[str, Any]) -> dict[str, Any]:

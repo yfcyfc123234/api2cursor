@@ -18,6 +18,7 @@ from adapters.cc_anthropic_adapter import (
     AnthropicStreamConverter,
     cc_to_messages_request,
     messages_to_cc_response,
+    optimize_cache_control,
 )
 from adapters.cc_gemini_adapter import (
     GeminiStreamConverter,
@@ -43,6 +44,7 @@ from routes.common import (
     build_responses_target,
     build_route_context,
     chat_error_chunk,
+    ensure_prompt_cache_key,
     format_upstream_error_for_cursor,
     forward_with_patches,
     inject_instructions_anthropic,
@@ -371,6 +373,8 @@ def _handle_responses_backend(ctx: RouteContext, payload: dict[str, Any], turn: 
     url, headers = build_responses_target(ctx)
     responses_payload = apply_body_modifications(responses_payload, ctx.body_modifications)
     headers = apply_header_modifications(headers, ctx.header_modifications)
+    # body_modifications 可能改写 model/instructions，cache key 放在其后生成
+    responses_payload = ensure_prompt_cache_key(responses_payload)
 
     if ctx.is_stream:
         return _handle_responses_stream(ctx, responses_payload, url, headers, turn)
@@ -616,6 +620,8 @@ def _handle_anthropic_backend(ctx: RouteContext, payload: dict[str, Any], turn: 
     url, headers = build_anthropic_target(ctx)
     anthropic_payload = apply_body_modifications(anthropic_payload, ctx.body_modifications)
     headers = apply_header_modifications(headers, ctx.header_modifications)
+    # inject / body_mods 之后再设顶层 cache_control，避免被改写或清掉
+    optimize_cache_control(anthropic_payload)
 
     if ctx.is_stream:
         return _handle_anthropic_stream(ctx, anthropic_payload, url, headers, turn)

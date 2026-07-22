@@ -13,7 +13,7 @@ from typing import Any
 import settings
 from flask import Blueprint, jsonify, request
 
-from adapters.cc_anthropic_adapter import cc_to_messages_request, messages_to_cc_response
+from adapters.cc_anthropic_adapter import cc_to_messages_request, messages_to_cc_response, optimize_cache_control
 from adapters.cc_gemini_adapter import GeminiStreamConverter, cc_to_gemini_request, gemini_to_cc_response
 from adapters.openai_compat_fixer import fix_response, fix_stream_chunk, normalize_request
 from adapters.responses_cc_adapter import ResponsesStreamConverter, cc_to_responses, responses_to_cc
@@ -29,6 +29,7 @@ from routes.common import (
     build_openai_target,
     build_responses_target,
     build_route_context,
+    ensure_prompt_cache_key,
     inject_instructions_anthropic,
     inject_instructions_cc,
     inject_instructions_responses,
@@ -256,6 +257,8 @@ def _handle_responses_backend(ctx: RouteContext, payload: dict[str, Any], turn: 
     url, headers = build_responses_target(ctx)
     payload = apply_body_modifications(payload, ctx.body_modifications)
     headers = apply_header_modifications(headers, ctx.header_modifications)
+    # body_modifications 可能改写 model/instructions，cache key 放在其后生成
+    payload = ensure_prompt_cache_key(payload)
 
     if ctx.is_stream:
         return _handle_responses_stream(ctx, payload, url, headers, turn)
@@ -515,6 +518,8 @@ def _handle_anthropic_backend(ctx: RouteContext, cc_payload: dict[str, Any], tur
     url, headers = build_anthropic_target(ctx)
     anthropic_payload = apply_body_modifications(anthropic_payload, ctx.body_modifications)
     headers = apply_header_modifications(headers, ctx.header_modifications)
+    # inject / body_mods 之后再设顶层 cache_control，避免被改写或清掉
+    optimize_cache_control(anthropic_payload)
 
     if ctx.is_stream:
         return _handle_anthropic_stream(ctx, anthropic_payload, url, headers, turn)

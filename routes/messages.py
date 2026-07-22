@@ -14,6 +14,7 @@ from flask import Blueprint, request, jsonify
 import settings
 from config import Config
 from routes.common import apply_body_modifications, apply_header_modifications, inject_instructions_anthropic, format_upstream_error_for_cursor
+from adapters.cc_anthropic_adapter import optimize_cache_control
 from utils.log_categories import log as cat_log
 from utils.http import build_anthropic_headers, forward_request, sse_response
 from utils.request_logger import (
@@ -67,6 +68,7 @@ def messages_passthrough():
 
     payload = inject_instructions_anthropic(payload, custom_instructions, instructions_position)
     payload = apply_body_modifications(payload, body_mods)
+    optimize_cache_control(payload)
 
     if not is_stream:
         attach_upstream_request(turn, payload, headers)
